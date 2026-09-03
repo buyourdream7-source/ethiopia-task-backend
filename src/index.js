@@ -13,7 +13,8 @@ const adminRoutes = require("./routes/admin");
 
 const app = express();
 
-app.use(cors({ origin: (process.env.CORS_ORIGIN || "*").split(",") }));
+const corsOrigin = process.env.CORS_ORIGIN || "*";
+app.use(cors({ origin: corsOrigin === "*" ? true : corsOrigin.split(",") }));
 app.use(express.json());
 
 app.get("/health", (req, res) => res.json({ ok: true }));
