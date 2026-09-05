@@ -38,6 +38,23 @@ router.post("/", requireAuth, requireRole("customer"), async (req, res) => {
   }
 
   try {
+    const { rows: userRows } = await db.query("SELECT subscription_active FROM users WHERE id = $1", [req.user.id]);
+    if (!userRows[0].subscription_active) {
+      const { rows: countRows } = await db.query(
+        "SELECT COUNT(*) AS n FROM bookings WHERE customer_id = $1 AND status = 'confirmed'",
+        [req.user.id]
+      );
+      const freeJobsUsed = Number(countRows[0].n);
+      const FREE_JOB_LIMIT = 3;
+      if (freeJobsUsed >= FREE_JOB_LIMIT) {
+        return res.status(402).json({
+          error: "You've used your 3 free jobs. Subscribe to keep booking.",
+          code: "TRIAL_EXPIRED",
+          free_jobs_used: freeJobsUsed,
+        });
+      }
+    }
+
     const { rows: cat } = await db.query("SELECT id FROM categories WHERE slug = $1", [category_slug]);
     if (!cat.length) return res.status(400).json({ error: "Unknown category" });
 
@@ -93,7 +110,8 @@ router.get("/", requireAuth, async (req, res) => {
            WHERE wp.user_id = $1 ORDER BY b.created_at DESC`;
     params = [req.user.id];
   } else {
-    sql = `SELECT b.*, wu.full_name AS worker_name, c.name_en AS category_name
+    sql = `SELECT b.*, wu.full_name AS worker_name, c.name_en AS category_name,
+                  EXISTS (SELECT 1 FROM reviews r WHERE r.booking_id = b.id) AS has_review
            FROM bookings b
            JOIN worker_profiles wp ON wp.id = b.worker_id
            JOIN users wu ON wu.id = wp.user_id

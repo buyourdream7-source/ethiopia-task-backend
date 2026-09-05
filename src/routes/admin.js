@@ -104,6 +104,28 @@ router.patch("/users/:id/suspend", async (req, res) => {
   res.json(rows[0]);
 });
 
+// --- Customer subscriptions (manual for now — no online payment collection wired up yet) ---
+
+router.get("/customers", async (req, res) => {
+  const { rows } = await db.query(`
+    SELECT u.id, u.full_name, u.phone, u.subscription_active,
+      (SELECT COUNT(*) FROM bookings b WHERE b.customer_id = u.id AND b.status = 'confirmed') AS free_jobs_used
+    FROM users u WHERE u.role = 'customer'
+    ORDER BY u.created_at DESC
+  `);
+  res.json(rows);
+});
+
+router.patch("/customers/:id/subscription", async (req, res) => {
+  const { active } = req.body;
+  const { rows } = await db.query(
+    "UPDATE users SET subscription_active = $1, updated_at = now() WHERE id = $2 AND role = 'customer' RETURNING id, full_name, subscription_active",
+    [!!active, req.params.id]
+  );
+  if (!rows.length) return res.status(404).json({ error: "Customer not found" });
+  res.json(rows[0]);
+});
+
 // --- Commission settings ---
 
 router.get("/settings/commission", async (req, res) => {
@@ -121,6 +143,23 @@ router.patch("/settings/commission", async (req, res) => {
     [String(rate), req.user.id]
   );
   res.json({ commission_rate: rate });
+});
+
+router.get("/settings/subscription-price", async (req, res) => {
+  const { rows } = await db.query("SELECT value FROM platform_settings WHERE key = 'subscription_price_etb'");
+  res.json({ subscription_price_etb: parseFloat(rows[0]?.value || "811.75") });
+});
+
+router.patch("/settings/subscription-price", async (req, res) => {
+  const { price } = req.body;
+  if (price === undefined || price < 0) {
+    return res.status(400).json({ error: "price must be a positive number" });
+  }
+  await db.query(
+    `UPDATE platform_settings SET value = $1, updated_at = now(), updated_by = $2 WHERE key = 'subscription_price_etb'`,
+    [String(price), req.user.id]
+  );
+  res.json({ subscription_price_etb: price });
 });
 
 // --- Categories ---

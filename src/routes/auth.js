@@ -62,7 +62,7 @@ router.post("/login", async (req, res) => {
     const { rows } = await db.query("SELECT * FROM users WHERE phone = $1", [phone]);
     const user = rows[0];
     if (!user) {
-      return res.status(401).json({ error: "Incorrect phone number or password" });
+      return res.status(401).json({ error: "Phone number or password incorrect" });
     }
     if (user.is_suspended) {
       return res.status(403).json({ error: "This account has been suspended. Contact support." });
@@ -70,7 +70,7 @@ router.post("/login", async (req, res) => {
 
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) {
-      return res.status(401).json({ error: "Incorrect phone number or password" });
+      return res.status(401).json({ error: "Phone number or password incorrect" });
     }
 
     delete user.password_hash;
