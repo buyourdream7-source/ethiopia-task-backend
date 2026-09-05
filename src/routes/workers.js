@@ -8,17 +8,17 @@ const router = express.Router();
  * GET /api/workers
  * Search & filter workers. Query params:
  *   category   - category slug
- *   lat, lng   - customer location, required for distance sort/filter
- *   radius_km  - max distance (default 15)
+ *   lat, lng   - customer location, used ONLY to show "X km away" on each result — never
+ *                filters or excludes a worker, and workers without a saved location still
+ *                show up (just without a distance figure)
  *   min_rating - e.g. 4
  *   verified_only - "true"
- *   sort       - "distance" | "price" | "rating" (default distance if lat/lng given, else rating)
+ *   sort       - "distance" | "price" | "rating" (default rating; distance requires lat/lng)
  */
 router.get("/", async (req, res) => {
-  const { category, lat, lng, radius_km, min_rating, verified_only, sort } = req.query;
+  const { category, lat, lng, min_rating, verified_only, sort } = req.query;
 
   const hasLocation = lat !== undefined && lng !== undefined;
-  const radius = radius_km ? parseFloat(radius_km) : 15;
 
   const params = [];
   const where = ["wp.is_available = true"];
@@ -45,22 +45,26 @@ router.get("/", async (req, res) => {
     params.push(parseFloat(lat), parseFloat(lng));
     const latIdx = params.length - 1;
     const lngIdx = params.length;
+    // Distance is computed only for display — it never filters or excludes a worker
+    // from results, and workers without a saved location just show no distance.
     distanceExpr = `(
-      6371 * acos(
-        cos(radians($${latIdx})) * cos(radians(wp.base_latitude)) *
-        cos(radians(wp.base_longitude) - radians($${lngIdx})) +
-        sin(radians($${latIdx})) * sin(radians(wp.base_latitude))
-      )
+      CASE WHEN wp.base_latitude IS NOT NULL AND wp.base_longitude IS NOT NULL THEN
+        6371 * acos(
+          LEAST(1, GREATEST(-1,
+            cos(radians($${latIdx})) * cos(radians(wp.base_latitude)) *
+            cos(radians(wp.base_longitude) - radians($${lngIdx})) +
+            sin(radians($${latIdx})) * sin(radians(wp.base_latitude))
+          ))
+        )
+      ELSE NULL END
     )`;
-    where.push(`wp.base_latitude IS NOT NULL AND wp.base_longitude IS NOT NULL`);
-    params.push(radius);
-    where.push(`${distanceExpr} <= $${params.length}`);
   }
 
   const sortCol =
     sort === "rating" ? "wp.average_rating DESC" :
     sort === "price" ? "min_price ASC" :
-    hasLocation ? "distance_km ASC" : "wp.average_rating DESC";
+    sort === "distance" && hasLocation ? "distance_km ASC NULLS LAST" :
+    "wp.average_rating DESC";
 
   const sql = `
     SELECT
@@ -69,7 +73,12 @@ router.get("/", async (req, res) => {
       wp.total_jobs_completed, wp.is_available,
       ${distanceExpr} AS distance_km,
       MIN(wc.price_min) AS min_price, MAX(wc.price_max) AS max_price,
-      array_agg(DISTINCT c.slug) AS categories
+      array_agg(DISTINCT c.slug) AS categories,
+      bool_or(c.requires_license) AS category_requires_license,
+      EXISTS (
+        SELECT 1 FROM verification_documents vd
+        WHERE vd.worker_id = wp.id AND vd.doc_type IN ('license', 'certificate') AND vd.status = 'approved'
+      ) AS has_license
     FROM worker_profiles wp
     JOIN users u ON u.id = wp.user_id
     LEFT JOIN worker_categories wc ON wc.worker_id = wp.id
@@ -89,9 +98,37 @@ router.get("/", async (req, res) => {
   }
 });
 
+router.get("/me", requireAuth, requireRole("worker"), async (req, res) => {
+  const { rows } = await db.query(
+    `SELECT wp.* FROM worker_profiles wp WHERE wp.user_id = $1`,
+    [req.user.id]
+  );
+  if (!rows.length) return res.status(404).json({ error: "Worker profile not found" });
+  const workerId = rows[0].id;
+
+  const { rows: categories } = await db.query(
+    `SELECT c.slug, c.name_en, c.requires_license, wc.price_min, wc.price_max
+     FROM worker_categories wc JOIN categories c ON c.id = wc.category_id
+     WHERE wc.worker_id = $1`,
+    [workerId]
+  );
+
+  const { rows: documents } = await db.query(
+    `SELECT id, doc_type, status, uploaded_at FROM verification_documents
+     WHERE worker_id = $1 ORDER BY uploaded_at DESC`,
+    [workerId]
+  );
+
+  res.json({ ...rows[0], categories, documents });
+});
+
 router.get("/:id", async (req, res) => {
   const { rows } = await db.query(
-    `SELECT wp.*, u.full_name, u.profile_photo_url, u.preferred_language
+    `SELECT wp.*, u.full_name, u.profile_photo_url, u.preferred_language,
+       EXISTS (
+         SELECT 1 FROM verification_documents vd
+         WHERE vd.worker_id = wp.id AND vd.doc_type IN ('license', 'certificate') AND vd.status = 'approved'
+       ) AS has_license
      FROM worker_profiles wp JOIN users u ON u.id = wp.user_id
      WHERE wp.id = $1`,
     [req.params.id]
@@ -99,7 +136,7 @@ router.get("/:id", async (req, res) => {
   if (!rows.length) return res.status(404).json({ error: "Worker not found" });
 
   const { rows: categories } = await db.query(
-    `SELECT c.slug, c.name_en, c.name_am, wc.price_min, wc.price_max
+    `SELECT c.slug, c.name_en, c.name_am, c.requires_license, wc.price_min, wc.price_max
      FROM worker_categories wc JOIN categories c ON c.id = wc.category_id
      WHERE wc.worker_id = $1`,
     [req.params.id]
@@ -118,19 +155,21 @@ router.get("/:id", async (req, res) => {
 // --- Worker self-management (role: worker) ---
 
 router.patch("/me/profile", requireAuth, requireRole("worker"), async (req, res) => {
-  const { bio, years_experience, service_radius_km, base_latitude, base_longitude, is_available } = req.body;
+  const { bio, years_experience, motivation, has_own_tools, service_radius_km, base_latitude, base_longitude, is_available } = req.body;
   const { rows } = await db.query(
     `UPDATE worker_profiles SET
        bio = COALESCE($1, bio),
        years_experience = COALESCE($2, years_experience),
-       service_radius_km = COALESCE($3, service_radius_km),
-       base_latitude = COALESCE($4, base_latitude),
-       base_longitude = COALESCE($5, base_longitude),
-       is_available = COALESCE($6, is_available),
+       motivation = COALESCE($3, motivation),
+       has_own_tools = COALESCE($4, has_own_tools),
+       service_radius_km = COALESCE($5, service_radius_km),
+       base_latitude = COALESCE($6, base_latitude),
+       base_longitude = COALESCE($7, base_longitude),
+       is_available = COALESCE($8, is_available),
        updated_at = now()
-     WHERE user_id = $7
+     WHERE user_id = $9
      RETURNING *`,
-    [bio, years_experience, service_radius_km, base_latitude, base_longitude, is_available, req.user.id]
+    [bio, years_experience, motivation, has_own_tools, service_radius_km, base_latitude, base_longitude, is_available, req.user.id]
   );
   if (!rows.length) return res.status(404).json({ error: "Worker profile not found" });
   res.json(rows[0]);
