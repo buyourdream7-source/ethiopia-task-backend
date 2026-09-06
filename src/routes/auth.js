@@ -2,6 +2,7 @@ const express = require("express");
 const bcrypt = require("bcryptjs");
 const db = require("../db");
 const { signToken } = require("../utils/jwt");
+const { requireAuth } = require("../middleware/auth");
 
 const router = express.Router();
 
@@ -80,6 +81,49 @@ router.post("/login", async (req, res) => {
     console.error(err);
     res.status(500).json({ error: "Login failed" });
   }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phone verification (OTP)
+//
+// No SMS provider is connected yet. Until one is, this returns the code
+// directly in the response as `dev_otp` so the flow is fully testable —
+// clearly not something to ship to real users. Once an SMS provider (e.g.
+// Twilio, AfroMessage) is set up, replace the "TODO: send real SMS" line
+// below with the actual send call, and stop returning `dev_otp`.
+// ─────────────────────────────────────────────────────────────────────────
+router.post("/send-otp", requireAuth, async (req, res) => {
+  const code = String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+  await db.query("DELETE FROM phone_otps WHERE user_id = $1", [req.user.id]);
+  await db.query(
+    "INSERT INTO phone_otps (user_id, code, expires_at) VALUES ($1, $2, $3)",
+    [req.user.id, code, expiresAt]
+  );
+
+  // TODO: send real SMS here once a provider is connected, e.g.:
+  //   await smsProvider.send(req.user.phone, `Your Y S R code is ${code}`);
+
+  res.json({ sent: true, dev_otp: code, expires_in_seconds: 600 });
+});
+
+router.post("/verify-otp", requireAuth, async (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: "code is required" });
+
+  const { rows } = await db.query(
+    "SELECT * FROM phone_otps WHERE user_id = $1 AND code = $2 AND expires_at > now()",
+    [req.user.id, String(code)]
+  );
+  if (!rows.length) {
+    return res.status(400).json({ error: "That code is incorrect or has expired." });
+  }
+
+  await db.query("UPDATE users SET is_phone_verified = true, updated_at = now() WHERE id = $1", [req.user.id]);
+  await db.query("DELETE FROM phone_otps WHERE user_id = $1", [req.user.id]);
+
+  res.json({ verified: true });
 });
 
 module.exports = router;
