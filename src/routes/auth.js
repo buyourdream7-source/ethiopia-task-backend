@@ -3,6 +3,7 @@ const bcrypt = require("bcryptjs");
 const db = require("../db");
 const { signToken } = require("../utils/jwt");
 const { requireAuth } = require("../middleware/auth");
+const { sendSms } = require("../utils/afromessage");
 
 const router = express.Router();
 
@@ -86,11 +87,10 @@ router.post("/login", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────
 // Phone verification (OTP)
 //
-// No SMS provider is connected yet. Until one is, this returns the code
-// directly in the response as `dev_otp` so the flow is fully testable —
-// clearly not something to ship to real users. Once an SMS provider (e.g.
-// Twilio, AfroMessage) is set up, replace the "TODO: send real SMS" line
-// below with the actual send call, and stop returning `dev_otp`.
+// Sends the code via AfroMessage if AFROMESSAGE_TOKEN is set. If it's not
+// set yet, or the send fails for any reason (bad credentials, no credit,
+// network issue), falls back to returning the code directly as `dev_otp`
+// so testing/registration never gets fully blocked by an SMS issue.
 // ─────────────────────────────────────────────────────────────────────────
 router.post("/send-otp", requireAuth, async (req, res) => {
   const code = String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
@@ -102,10 +102,21 @@ router.post("/send-otp", requireAuth, async (req, res) => {
     [req.user.id, code, expiresAt]
   );
 
-  // TODO: send real SMS here once a provider is connected, e.g.:
-  //   await smsProvider.send(req.user.phone, `Your Y S R code is ${code}`);
+  let smsSent = false;
+  let smsError = null;
+  try {
+    await sendSms(req.user.phone, `Your Y S R verification code is ${code}`);
+    smsSent = true;
+  } catch (e) {
+    smsError = e.message;
+  }
 
-  res.json({ sent: true, dev_otp: code, expires_in_seconds: 600 });
+  const response = { sent: smsSent, expires_in_seconds: 600 };
+  if (!smsSent) {
+    response.dev_otp = code;
+    response.dev_note = smsError; // visible only in this fallback case, useful for debugging AfroMessage setup
+  }
+  res.json(response);
 });
 
 router.post("/verify-otp", requireAuth, async (req, res) => {
