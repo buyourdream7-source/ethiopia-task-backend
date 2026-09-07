@@ -19,6 +19,7 @@ CREATE TABLE users (
   profile_photo_url   TEXT,
   is_phone_verified   BOOLEAN NOT NULL DEFAULT false,
   is_suspended        BOOLEAN NOT NULL DEFAULT false,
+  subscription_active BOOLEAN NOT NULL DEFAULT false,  -- customers get 3 free confirmed jobs, then need this true to book more
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -52,6 +53,10 @@ CREATE TABLE categories (
   name_en     VARCHAR(100) NOT NULL,
   name_am     VARCHAR(100),
   icon_key    VARCHAR(50),
+  parent_slug VARCHAR(50) REFERENCES categories(slug),
+  requires_license BOOLEAN NOT NULL DEFAULT false,
+  pricing_type VARCHAR(10) NOT NULL DEFAULT 'variable' CHECK (pricing_type IN ('fixed', 'variable')),
+  inspection_fee NUMERIC(10,2) NOT NULL DEFAULT 100,
   is_active   BOOLEAN NOT NULL DEFAULT true,
   sort_order  INT NOT NULL DEFAULT 0,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -65,6 +70,8 @@ CREATE TABLE worker_profiles (
   user_id                  UUID UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   bio                      TEXT,
   years_experience         INT DEFAULT 0,
+  motivation               TEXT,                  -- "Why do you want to work on this platform?"
+  has_own_tools            BOOLEAN,                -- Does the worker bring their own tools/equipment?
   service_radius_km        NUMERIC(5,2) DEFAULT 10,
   base_latitude            NUMERIC(9,6),
   base_longitude           NUMERIC(9,6),
@@ -123,6 +130,7 @@ CREATE TABLE platform_settings (
 );
 
 INSERT INTO platform_settings (key, value) VALUES ('commission_rate', '0.10');
+INSERT INTO platform_settings (key, value) VALUES ('subscription_price_etb', '811.75');
 
 -- ============================================================
 -- BOOKINGS
@@ -132,15 +140,26 @@ CREATE TABLE bookings (
   customer_id         UUID NOT NULL REFERENCES users(id),
   worker_id           UUID NOT NULL REFERENCES worker_profiles(id),
   category_id         UUID NOT NULL REFERENCES categories(id),
-  status              VARCHAR(20) NOT NULL DEFAULT 'requested'
-                        CHECK (status IN ('requested', 'accepted', 'on_the_way', 'started',
+  status              VARCHAR(20) NOT NULL DEFAULT 'pending_payment'
+                        CHECK (status IN ('pending_payment', 'requested', 'accepted', 'on_the_way', 'started',
+                                           'quote_sent', 'quote_approved', 'pending_final_payment', 'in_progress',
                                            'completed', 'confirmed', 'cancelled', 'disputed')),
+  pricing_type         VARCHAR(10) NOT NULL DEFAULT 'variable' CHECK (pricing_type IN ('fixed', 'variable')),
   scheduled_at         TIMESTAMPTZ,
   address_text         TEXT NOT NULL,
   latitude             NUMERIC(9,6),
   longitude            NUMERIC(9,6),
   price_quoted         NUMERIC(10,2) NOT NULL,
   price_final          NUMERIC(10,2),
+  price_locked         BOOLEAN NOT NULL DEFAULT false,  -- true once no one (incl. the worker) can change price_final
+  inspection_fee_amount NUMERIC(10,2),
+  quote_amount          NUMERIC(10,2),
+  quote_labor_amount    NUMERIC(10,2),
+  quote_materials_amount NUMERIC(10,2),
+  quote_note            TEXT,
+  quote_status          VARCHAR(20) CHECK (quote_status IN ('pending', 'approved', 'rejected')),
+  quote_submitted_at    TIMESTAMPTZ,
+  quote_approved_at     TIMESTAMPTZ,
   commission_rate      NUMERIC(5,4),          -- snapshot at time of completion
   commission_amount    NUMERIC(10,2),
   worker_earnings      NUMERIC(10,2),
@@ -170,17 +189,20 @@ CREATE INDEX idx_booking_history_booking ON booking_status_history(booking_id);
 -- ============================================================
 CREATE TABLE payments (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  booking_id          UUID UNIQUE NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  booking_id          UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  payment_type        VARCHAR(20) NOT NULL DEFAULT 'full_payment'
+                        CHECK (payment_type IN ('inspection_fee', 'full_payment', 'final_payment')),
   amount              NUMERIC(10,2) NOT NULL,
   status              VARCHAR(20) NOT NULL DEFAULT 'pending'
                         CHECK (status IN ('pending', 'paid', 'failed', 'refunded')),
-  provider             VARCHAR(30),           -- 'telebirr', 'chapa', 'manual', etc.
+  provider             VARCHAR(30),           -- 'chapa', 'manual', etc.
   provider_reference   VARCHAR(255),
+  tx_ref               VARCHAR(100) UNIQUE,   -- our own reference sent to the payment provider
   created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_payments_status ON payments(status);
+CREATE INDEX idx_payments_booking ON payments(booking_id);
 
 -- ============================================================
 -- REVIEWS
@@ -255,16 +277,18 @@ CREATE INDEX idx_notifications_user ON notifications(user_id, is_read);
 -- ============================================================
 -- SEED CATEGORIES
 -- ============================================================
-INSERT INTO categories (slug, name_en, name_am, icon_key, sort_order) VALUES
-  ('electrician', 'Electrician', 'ኤሌክትሪክ', 'zap', 1),
-  ('plumber', 'Plumber', 'ቧንቧ', 'droplets', 2),
-  ('mechanic', 'Mechanic', 'መካኒክ', 'car', 3),
-  ('cleaner', 'Cleaner', 'ጽዳት', 'sparkles', 4),
-  ('phone_repair', 'Phone Repair', 'ስልክ ጥገና', 'smartphone', 5),
-  ('computer_repair', 'Computer Repair', 'ኮምፒዩተር ጥገና', 'monitor', 6),
-  ('tutor', 'Tutor', 'ትምህርት', 'graduation-cap', 7),
-  ('photographer', 'Photographer', 'ፎቶግራፍ', 'camera', 8),
-  ('graphic_design', 'Graphic Design', 'ግራፊክ ዲዛይን', 'pen-tool', 9),
-  ('video_editor', 'Video Editor', 'ቪዲዮ አርታኢ', 'video', 10),
-  ('construction', 'Construction', 'ግንባታ', 'hard-hat', 11),
-  ('moving', 'Moving Services', 'ማዛወሪያ', 'truck', 12);
+INSERT INTO categories (slug, name_en, name_am, icon_key, sort_order, requires_license, pricing_type) VALUES
+  ('electrician', 'Electrician', 'ኤሌክትሪክ', 'zap', 1, true, 'variable'),
+  ('plumber', 'Plumber', 'ቧንቧ', 'droplets', 2, true, 'variable'),
+  ('mechanic', 'Mechanic', 'መካኒክ', 'car', 3, true, 'variable'),
+  ('cleaner', 'Cleaner', 'ጽዳት', 'sparkles', 4, false, 'fixed'),
+  ('phone_repair', 'Phone Repair', 'ስልክ ጥገና', 'smartphone', 5, false, 'fixed'),
+  ('computer_repair', 'Computer Repair', 'ኮምፒዩተር ጥገና', 'monitor', 6, false, 'fixed'),
+  ('tutor', 'Tutor', 'ትምህርት', 'graduation-cap', 7, false, 'fixed'),
+  ('photographer', 'Photographer', 'ፎቶግራፍ', 'camera', 8, false, 'fixed'),
+  ('graphic_design', 'Graphic Design', 'ግራፊክ ዲዛይን', 'pen-tool', 9, false, 'fixed'),
+  ('video_editor', 'Video Editor', 'ቪዲዮ አርታኢ', 'video', 10, false, 'fixed'),
+  ('construction', 'Construction', 'ግንባታ', 'hard-hat', 11, true, 'variable'),
+  ('moving', 'Moving Services', 'ማዛወሪያ', 'truck', 12, false, 'fixed'),
+  ('personal_trainer', 'Personal Trainer', 'የግል አሰልጣኝ', 'dumbbell', 13, true, 'fixed'),
+  ('teacher', 'Teacher', 'መምህር', 'graduation-cap', 14, true, 'fixed');

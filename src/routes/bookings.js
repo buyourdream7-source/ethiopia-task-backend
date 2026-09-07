@@ -6,12 +6,16 @@ const { getCommissionRate, splitPayment } = require("../utils/commission");
 const router = express.Router();
 
 // Which status transitions are legal, and who is allowed to make them.
+// Note: 'started' -> 'completed' is only valid for FIXED-price bookings —
+// variable-price bookings must go through POST /:id/quote and the customer's
+// approval + final payment first (enforced below, not just by this map).
 const TRANSITIONS = {
-  requested:  { accepted: "worker", cancelled: "either" },
-  accepted:   { on_the_way: "worker", cancelled: "either" },
-  on_the_way: { started: "worker", cancelled: "either" },
-  started:    { completed: "worker" },
-  completed:  { confirmed: "customer", disputed: "either" },
+  requested:   { accepted: "worker", cancelled: "either" },
+  accepted:    { on_the_way: "worker", cancelled: "either" },
+  on_the_way:  { started: "worker", cancelled: "either" },
+  started:     { completed: "worker", cancelled: "either" },
+  in_progress: { completed: "worker", cancelled: "either" },
+  completed:   { confirmed: "customer", disputed: "either" },
 };
 
 async function loadBookingForUser(bookingId, user) {
@@ -29,7 +33,11 @@ async function loadBookingForUser(bookingId, user) {
   return { booking, isCustomer, isWorker };
 }
 
-// POST /api/bookings — customer requests a worker
+// POST /api/bookings — customer requests a worker.
+// Creates the booking in 'pending_payment' — it does NOT become visible to
+// the worker until the initial payment (inspection fee, or the full amount
+// for fixed-price categories) actually clears via Chapa. The frontend must
+// follow this up with POST /api/payments/bookings/:id/initiate.
 router.post("/", requireAuth, requireRole("customer"), async (req, res) => {
   const { worker_id, category_slug, scheduled_at, address_text, latitude, longitude, price_quoted } = req.body;
 
@@ -55,8 +63,12 @@ router.post("/", requireAuth, requireRole("customer"), async (req, res) => {
       }
     }
 
-    const { rows: cat } = await db.query("SELECT id FROM categories WHERE slug = $1", [category_slug]);
+    const { rows: cat } = await db.query(
+      "SELECT id, pricing_type, inspection_fee FROM categories WHERE slug = $1",
+      [category_slug]
+    );
     if (!cat.length) return res.status(400).json({ error: "Unknown category" });
+    const category = cat[0];
 
     const { rows: worker } = await db.query(
       "SELECT id, is_available FROM worker_profiles WHERE id = $1",
@@ -65,21 +77,21 @@ router.post("/", requireAuth, requireRole("customer"), async (req, res) => {
     if (!worker.length) return res.status(404).json({ error: "Worker not found" });
     if (!worker[0].is_available) return res.status(409).json({ error: "This worker is not currently available" });
 
+    const inspectionFeeAmount = category.pricing_type === "variable" ? category.inspection_fee : null;
+
     const { rows: booking } = await db.query(
       `INSERT INTO bookings
-         (customer_id, worker_id, category_id, scheduled_at, address_text, latitude, longitude, price_quoted)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         (customer_id, worker_id, category_id, scheduled_at, address_text, latitude, longitude,
+          price_quoted, status, pricing_type, inspection_fee_amount)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending_payment',$9,$10)
        RETURNING *`,
-      [req.user.id, worker_id, cat[0].id, scheduled_at || null, address_text, latitude || null, longitude || null, price_quoted]
+      [req.user.id, worker_id, category.id, scheduled_at || null, address_text, latitude || null, longitude || null,
+       price_quoted, category.pricing_type, inspectionFeeAmount]
     );
 
     await db.query(
-      `INSERT INTO booking_status_history (booking_id, status, changed_by) VALUES ($1,'requested',$2)`,
+      `INSERT INTO booking_status_history (booking_id, status, changed_by) VALUES ($1,'pending_payment',$2)`,
       [booking[0].id, req.user.id]
-    );
-    await db.query(
-      `INSERT INTO payments (booking_id, amount, status) VALUES ($1,$2,'pending')`,
-      [booking[0].id, price_quoted]
     );
 
     // A conversation thread is opened automatically so chat is ready immediately
@@ -96,6 +108,81 @@ router.post("/", requireAuth, requireRole("customer"), async (req, res) => {
     console.error(err);
     res.status(500).json({ error: "Could not create booking" });
   }
+});
+
+// POST /api/bookings/:id/quote — worker submits a price after inspecting (variable-price only)
+router.post("/:id/quote", requireAuth, requireRole("worker"), async (req, res) => {
+  const { amount, labor_amount, materials_amount, note } = req.body;
+  const ctx = await loadBookingForUser(req.params.id, req.user);
+  if (!ctx || !ctx.isWorker) return res.status(404).json({ error: "Booking not found" });
+  const { booking } = ctx;
+
+  if (booking.pricing_type !== "variable") {
+    return res.status(400).json({ error: "This category has fixed pricing — no quote is needed" });
+  }
+  if (booking.status !== "started") {
+    return res.status(400).json({ error: `Cannot submit a quote while the booking is '${booking.status}'` });
+  }
+  if (!amount || amount <= 0) {
+    return res.status(400).json({ error: "A valid amount is required" });
+  }
+
+  await db.query(
+    `UPDATE bookings SET status = 'quote_sent', quote_amount = $1, quote_labor_amount = $2,
+       quote_materials_amount = $3, quote_note = $4, quote_status = 'pending',
+       quote_submitted_at = now(), updated_at = now()
+     WHERE id = $5`,
+    [amount, labor_amount || null, materials_amount || null, note || null, booking.id]
+  );
+  await db.query(
+    "INSERT INTO booking_status_history (booking_id, status, changed_by, note) VALUES ($1,'quote_sent',$2,$3)",
+    [booking.id, req.user.id, note || null]
+  );
+
+  const { rows } = await db.query("SELECT * FROM bookings WHERE id = $1", [booking.id]);
+  res.json(rows[0]);
+});
+
+// PATCH /api/bookings/:id/quote — customer approves or rejects the worker's quote
+router.patch("/:id/quote", requireAuth, requireRole("customer"), async (req, res) => {
+  const { decision } = req.body; // 'approved' | 'rejected'
+  const ctx = await loadBookingForUser(req.params.id, req.user);
+  if (!ctx || !ctx.isCustomer) return res.status(404).json({ error: "Booking not found" });
+  const { booking } = ctx;
+
+  if (booking.status !== "quote_sent") {
+    return res.status(400).json({ error: `No quote awaiting a decision (booking status: ${booking.status})` });
+  }
+  if (!["approved", "rejected"].includes(decision)) {
+    return res.status(400).json({ error: "decision must be 'approved' or 'rejected'" });
+  }
+
+  if (decision === "approved") {
+    // Approval alone does NOT charge anything or lock the price yet — that only
+    // happens once the final payment actually clears (see payments.js). This
+    // is what guarantees a worker can never move the price after this point.
+    await db.query(
+      `UPDATE bookings SET status = 'pending_final_payment', quote_status = 'approved',
+         quote_approved_at = now(), updated_at = now()
+       WHERE id = $1`,
+      [booking.id]
+    );
+  } else {
+    // Rejected — back to 'started' so the worker can submit a revised quote.
+    await db.query(
+      `UPDATE bookings SET status = 'started', quote_status = 'rejected', updated_at = now()
+       WHERE id = $1`,
+      [booking.id]
+    );
+  }
+
+  await db.query(
+    "INSERT INTO booking_status_history (booking_id, status, changed_by) VALUES ($1,$2,$3)",
+    [booking.id, decision === "approved" ? "quote_approved" : "quote_rejected", req.user.id]
+  );
+
+  const { rows } = await db.query("SELECT * FROM bookings WHERE id = $1", [booking.id]);
+  res.json(rows[0]);
 });
 
 // GET /api/bookings — list bookings for the logged-in user (customer or worker)
@@ -131,9 +218,53 @@ router.get("/:id", requireAuth, async (req, res) => {
     "SELECT * FROM booking_status_history WHERE booking_id = $1 ORDER BY changed_at ASC",
     [req.params.id]
   );
-  const { rows: payment } = await db.query("SELECT * FROM payments WHERE booking_id = $1", [req.params.id]);
+  const { rows: payments } = await db.query(
+    "SELECT * FROM payments WHERE booking_id = $1 ORDER BY created_at ASC",
+    [req.params.id]
+  );
 
-  res.json({ ...ctx.booking, history, payment: payment[0] || null });
+  res.json({ ...ctx.booking, history, payments });
+});
+
+// GET /api/bookings/:id/receipt — a clean digital receipt for a confirmed job
+router.get("/:id/receipt", requireAuth, async (req, res) => {
+  const ctx = await loadBookingForUser(req.params.id, req.user);
+  if (!ctx) return res.status(404).json({ error: "Booking not found" });
+  const { booking } = ctx;
+
+  if (booking.status !== "confirmed") {
+    return res.status(400).json({ error: "A receipt is only available once a job is confirmed" });
+  }
+
+  const { rows: payments } = await db.query(
+    "SELECT payment_type, amount, status, created_at AS paid_at, provider FROM payments WHERE booking_id = $1 AND status = 'paid' ORDER BY created_at ASC",
+    [booking.id]
+  );
+
+  const { rows: details } = await db.query(
+    `SELECT b.*, c.name_en AS category_name, cu.full_name AS customer_name, wu.full_name AS worker_name
+     FROM bookings b
+     JOIN categories c ON c.id = b.category_id
+     JOIN users cu ON cu.id = b.customer_id
+     JOIN worker_profiles wp ON wp.id = b.worker_id
+     JOIN users wu ON wu.id = wp.user_id
+     WHERE b.id = $1`,
+    [booking.id]
+  );
+
+  res.json({
+    booking_id: booking.id,
+    category: details[0].category_name,
+    customer_name: details[0].customer_name,
+    worker_name: details[0].worker_name,
+    pricing_type: booking.pricing_type,
+    payments,
+    total_paid: payments.reduce((sum, p) => sum + Number(p.amount), 0),
+    commission_rate: booking.commission_rate,
+    commission_amount: booking.commission_amount,
+    worker_earnings: booking.worker_earnings,
+    confirmed_at: booking.updated_at,
+  });
 });
 
 // PATCH /api/bookings/:id/status — move a booking through its lifecycle
@@ -160,11 +291,22 @@ router.patch("/:id/status", requireAuth, async (req, res) => {
 
   try {
     if (nextStatus === "completed") {
-      // Worker marks the job physically done and reports the final price.
-      const finalPrice = price_final || booking.price_quoted;
+      // Price was already locked in at payment time (fixed) or final-payment
+      // confirmation (variable) — it is NEVER taken from this request. A
+      // worker cannot change the approved price at this or any later step.
+      if (!booking.price_locked || booking.price_final == null) {
+        return res.status(409).json({ error: "This booking's price isn't locked in yet — payment must clear first." });
+      }
+      if (booking.pricing_type === "variable" && booking.status === "started") {
+        return res.status(400).json({ error: "Submit a quote first (POST /:id/quote) before marking a variable-price job complete." });
+      }
+      // This starts a 12-hour window for the customer to confirm & pay —
+      // if it passes without a confirmation, they get auto-suspended until
+      // an admin unbans them (see /admin/users/:id/suspend).
+      await db.query("UPDATE bookings SET status = 'completed', updated_at = now() WHERE id = $1", [booking.id]);
       await db.query(
-        "UPDATE bookings SET status = $1, price_final = $2, updated_at = now() WHERE id = $3",
-        [nextStatus, finalPrice, booking.id]
+        "UPDATE users SET payment_deadline = now() + interval '12 hours' WHERE id = $1",
+        [booking.customer_id]
       );
     } else if (nextStatus === "confirmed") {
       // Customer confirms completion — this is what actually settles the payment split.
@@ -184,6 +326,9 @@ router.patch("/:id/status", requireAuth, async (req, res) => {
          WHERE id = $1`,
         [booking.worker_id]
       );
+      // Paid on time — clear their payment deadline. Does not lift an existing
+      // suspension automatically; that's an admin-only action (see /admin/users/:id/suspend).
+      await db.query("UPDATE users SET payment_deadline = NULL WHERE id = $1", [booking.customer_id]);
     } else {
       await db.query("UPDATE bookings SET status = $1, updated_at = now() WHERE id = $2", [nextStatus, booking.id]);
     }
