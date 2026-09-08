@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const db = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { initializePayment, verifyPayment } = require("../utils/chapa");
+const { notify } = require("../utils/notify");
 
 const router = express.Router();
 
@@ -32,6 +33,8 @@ async function applyConfirmedPayment(payment) {
          WHERE id = $2`,
         [shouldLockPrice, booking.id]
       );
+      const { rows: w } = await db.query("SELECT user_id FROM worker_profiles WHERE id = $1", [booking.worker_id]);
+      if (w.length) await notify(w[0].user_id, "New job request", "A customer has booked you — payment received.", booking.id);
     }
   } else if (payment.payment_type === "final_payment") {
     if (booking.status === "pending_final_payment") {
@@ -40,6 +43,8 @@ async function applyConfirmedPayment(payment) {
          WHERE id = $1`,
         [booking.id]
       );
+      const { rows: w } = await db.query("SELECT user_id FROM worker_profiles WHERE id = $1", [booking.worker_id]);
+      if (w.length) await notify(w[0].user_id, "Payment received", "The customer paid your quote — you can start the job.", booking.id);
     }
   }
 }
@@ -106,6 +111,15 @@ router.post("/bookings/:id/initiate", requireAuth, requireRole("customer"), asyn
   const email = booking.email || `${booking.phone.replace(/\D/g, "")}@ysr-users.app`;
   const [firstName, ...rest] = (booking.full_name || "Customer").split(" ");
 
+  // TEST MODE — only active if PAYMENT_TEST_MODE=true is explicitly set on the
+  // server (never on by default, and useless once CHAPA_SECRET_KEY is real,
+  // since that path is checked first). No money moves; nothing is silently
+  // trusted from the frontend — advancing a test payment still requires a
+  // separate authenticated server call (see /test/:tx_ref/simulate below).
+  if (!process.env.CHAPA_SECRET_KEY && process.env.PAYMENT_TEST_MODE === "true") {
+    return res.json({ test_mode: true, tx_ref: txRef, amount });
+  }
+
   try {
     const { checkoutUrl } = await initializePayment({
       amount,
@@ -122,6 +136,29 @@ router.post("/bookings/:id/initiate", requireAuth, requireRole("customer"), asyn
     }
     res.status(502).json({ error: e.message });
   }
+});
+
+/**
+ * POST /api/payments/test/:tx_ref/simulate
+ * TEST MODE ONLY (PAYMENT_TEST_MODE=true, no real Chapa key set). Lets the
+ * logged-in owner of a pending test payment mark it paid, using the exact
+ * same server-side side-effect logic as a real confirmed payment. This
+ * endpoint does nothing at all unless test mode is explicitly enabled.
+ */
+router.post("/test/:tx_ref/simulate", requireAuth, async (req, res) => {
+  if (process.env.CHAPA_SECRET_KEY || process.env.PAYMENT_TEST_MODE !== "true") {
+    return res.status(403).json({ error: "Test mode is not enabled" });
+  }
+
+  const { rows } = await db.query(
+    `SELECT p.* FROM payments p JOIN bookings b ON b.id = p.booking_id
+     WHERE p.tx_ref = $1 AND b.customer_id = $2`,
+    [req.params.tx_ref, req.user.id]
+  );
+  if (!rows.length) return res.status(404).json({ error: "Payment not found" });
+
+  await applyConfirmedPayment(rows[0]);
+  res.json({ status: "paid", test_mode: true });
 });
 
 /**

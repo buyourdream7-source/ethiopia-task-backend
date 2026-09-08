@@ -1,6 +1,7 @@
 const express = require("express");
 const db = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
+const { notify } = require("../utils/notify");
 const { getCommissionRate, splitPayment } = require("../utils/commission");
 
 const router = express.Router();
@@ -140,6 +141,7 @@ router.post("/:id/quote", requireAuth, requireRole("worker"), async (req, res) =
   );
 
   const { rows } = await db.query("SELECT * FROM bookings WHERE id = $1", [booking.id]);
+  await notify(booking.customer_id, "New quote", `Your worker sent a quote of ${amount} ETB — review it in Bookings.`, booking.id);
   res.json(rows[0]);
 });
 
@@ -180,6 +182,12 @@ router.patch("/:id/quote", requireAuth, requireRole("customer"), async (req, res
     "INSERT INTO booking_status_history (booking_id, status, changed_by) VALUES ($1,$2,$3)",
     [booking.id, decision === "approved" ? "quote_approved" : "quote_rejected", req.user.id]
   );
+
+  const { rows: w } = await db.query("SELECT user_id FROM worker_profiles WHERE id = $1", [booking.worker_id]);
+  if (w.length) {
+    if (decision === "approved") await notify(w[0].user_id, "Quote approved", "The customer approved your quote and is completing payment.", booking.id);
+    else await notify(w[0].user_id, "Quote rejected", "The customer rejected your quote — you can submit a new one.", booking.id);
+  }
 
   const { rows } = await db.query("SELECT * FROM bookings WHERE id = $1", [booking.id]);
   res.json(rows[0]);
@@ -308,8 +316,12 @@ router.patch("/:id/status", requireAuth, async (req, res) => {
         "UPDATE users SET payment_deadline = now() + interval '12 hours' WHERE id = $1",
         [booking.customer_id]
       );
+      await notify(booking.customer_id, "Job marked complete", "Please confirm the job so the worker gets paid.", booking.id);
     } else if (nextStatus === "confirmed") {
       // Customer confirms completion — this is what actually settles the payment split.
+      // Note: this does NOT touch the payments table — every payment here was
+      // already verified and marked 'paid' by Chapa at the time it happened
+      // (see payments.js). Nothing gets marked paid based on this request alone.
       const rate = await getCommissionRate();
       const finalPrice = booking.price_final || booking.price_quoted;
       const { commissionAmount, workerEarnings } = splitPayment(finalPrice, rate);
@@ -320,7 +332,6 @@ router.patch("/:id/status", requireAuth, async (req, res) => {
          WHERE id = $4`,
         [rate, commissionAmount, workerEarnings, booking.id]
       );
-      await db.query("UPDATE payments SET status = 'paid', updated_at = now() WHERE booking_id = $1", [booking.id]);
       await db.query(
         `UPDATE worker_profiles SET total_jobs_completed = total_jobs_completed + 1
          WHERE id = $1`,
@@ -329,8 +340,20 @@ router.patch("/:id/status", requireAuth, async (req, res) => {
       // Paid on time — clear their payment deadline. Does not lift an existing
       // suspension automatically; that's an admin-only action (see /admin/users/:id/suspend).
       await db.query("UPDATE users SET payment_deadline = NULL WHERE id = $1", [booking.customer_id]);
+
+      const { rows: w } = await db.query("SELECT user_id FROM worker_profiles WHERE id = $1", [booking.worker_id]);
+      if (w.length) await notify(w[0].user_id, "Job confirmed", `The customer confirmed the job — ${workerEarnings} ETB is yours.`, booking.id);
     } else {
       await db.query("UPDATE bookings SET status = $1, updated_at = now() WHERE id = $2", [nextStatus, booking.id]);
+
+      const notifyMap = {
+        accepted: [booking.customer_id, "Worker accepted", "Your worker accepted the job and is getting ready."],
+        on_the_way: [booking.customer_id, "Worker on the way", "Your worker is heading to your location."],
+        started: [booking.customer_id, "Job started", "Your worker has started the job."],
+        cancelled: [isWorker ? booking.customer_id : null, "Booking cancelled", note || "The booking was cancelled."],
+      };
+      const n = notifyMap[nextStatus];
+      if (n && n[0]) await notify(n[0], n[1], n[2], booking.id);
     }
 
     if (nextStatus === "cancelled" && note) {

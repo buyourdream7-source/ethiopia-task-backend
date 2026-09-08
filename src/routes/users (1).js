@@ -7,7 +7,7 @@ const router = express.Router();
 router.get("/me", requireAuth, async (req, res) => {
   const { rows } = await db.query(
     `SELECT id, phone, email, full_name, role, preferred_language,
-            profile_photo_url, is_phone_verified, subscription_active, created_at
+            profile_photo_url, is_phone_verified, subscription_active, notifications_enabled, created_at
      FROM users WHERE id = $1`,
     [req.user.id]
   );
@@ -31,17 +31,18 @@ router.get("/me", requireAuth, async (req, res) => {
 });
 
 router.patch("/me", requireAuth, async (req, res) => {
-  const { full_name, email, preferred_language, profile_photo_url } = req.body;
+  const { full_name, email, preferred_language, profile_photo_url, notifications_enabled } = req.body;
   const { rows } = await db.query(
     `UPDATE users SET
        full_name = COALESCE($1, full_name),
        email = COALESCE($2, email),
        preferred_language = COALESCE($3, preferred_language),
        profile_photo_url = COALESCE($4, profile_photo_url),
+       notifications_enabled = COALESCE($5, notifications_enabled),
        updated_at = now()
-     WHERE id = $5
-     RETURNING id, phone, email, full_name, role, preferred_language, profile_photo_url`,
-    [full_name, email, preferred_language, profile_photo_url, req.user.id]
+     WHERE id = $6
+     RETURNING id, phone, email, full_name, role, preferred_language, profile_photo_url, notifications_enabled`,
+    [full_name, email, preferred_language, profile_photo_url, notifications_enabled, req.user.id]
   );
   res.json(rows[0]);
 });
