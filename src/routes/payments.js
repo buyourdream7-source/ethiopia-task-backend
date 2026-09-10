@@ -142,6 +142,14 @@ router.post("/bookings/:id/initiate", requireAuth, requireRole("customer"), asyn
     return res.json({ test_mode: true, tx_ref: txRef, amount });
   }
 
+  // Only the job payment (not the inspection fee, which stays 100% platform)
+  // gets split with the worker — and only if they've linked a bank account.
+  let subaccountId = null;
+  if (expectedType === "full_payment" || expectedType === "final_payment") {
+    const { rows: w } = await db.query("SELECT chapa_subaccount_id FROM worker_profiles WHERE id = $1", [booking.worker_id]);
+    subaccountId = w[0]?.chapa_subaccount_id || null;
+  }
+
   try {
     const { checkoutUrl } = await initializePayment({
       amount,
@@ -150,6 +158,7 @@ router.post("/bookings/:id/initiate", requireAuth, requireRole("customer"), asyn
       lastName: rest.join(" ") || "-",
       txRef,
       returnUrl: `${FRONTEND_URL}?payment_booking=${booking.id}&tx_ref=${txRef}`,
+      subaccountId,
     });
     res.json({ checkout_url: checkoutUrl, tx_ref: txRef, amount });
   } catch (e) {

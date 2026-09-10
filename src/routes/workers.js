@@ -1,6 +1,8 @@
 const express = require("express");
 const db = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
+const { getBanks, createSubaccount } = require("../utils/chapa");
+const { getCommissionRate } = require("../utils/commission");
 
 const router = express.Router();
 
@@ -235,6 +237,54 @@ router.post("/me/documents", requireAuth, requireRole("worker"), async (req, res
   );
 
   res.status(201).json(rows[0]);
+});
+
+// GET /api/workers/me/banks — list of banks Chapa supports, for the picker in Settings
+router.get("/me/banks", requireAuth, requireRole("worker"), async (req, res) => {
+  try {
+    const banks = await getBanks();
+    res.json(banks);
+  } catch (e) {
+    if (e.code === "PAYMENT_NOT_CONFIGURED") return res.status(503).json({ error: e.message, code: e.code });
+    res.status(502).json({ error: e.message });
+  }
+});
+
+// PATCH /api/workers/me/bank-details — save bank info and create/refresh the
+// Chapa subaccount used to automatically route this worker's share of a
+// payment straight to their bank (see split payments in payments.js).
+router.patch("/me/bank-details", requireAuth, requireRole("worker"), async (req, res) => {
+  const { bank_code, bank_name, account_number, account_name } = req.body;
+  if (!bank_code || !account_number || !account_name) {
+    return res.status(400).json({ error: "bank_code, account_number, and account_name are required" });
+  }
+
+  const { rows } = await db.query("SELECT id FROM worker_profiles WHERE user_id = $1", [req.user.id]);
+  if (!rows.length) return res.status(404).json({ error: "Worker profile not found" });
+  const workerId = rows[0].id;
+
+  try {
+    const rate = await getCommissionRate();
+    const subaccountId = await createSubaccount({
+      businessName: account_name,
+      bankCode: bank_code,
+      accountNumber: account_number,
+      accountName: account_name,
+      splitValue: 1 - rate, // the worker's share; the rest stays with the platform automatically
+    });
+
+    const { rows: updated } = await db.query(
+      `UPDATE worker_profiles SET bank_code = $1, bank_name = $2, account_number = $3,
+         account_name = $4, chapa_subaccount_id = $5, updated_at = now()
+       WHERE id = $6
+       RETURNING bank_name, account_number, account_name, chapa_subaccount_id`,
+      [bank_code, bank_name, account_number, account_name, subaccountId, workerId]
+    );
+    res.json(updated[0]);
+  } catch (e) {
+    if (e.code === "PAYMENT_NOT_CONFIGURED") return res.status(503).json({ error: e.message, code: e.code });
+    res.status(502).json({ error: e.message });
+  }
 });
 
 module.exports = router;

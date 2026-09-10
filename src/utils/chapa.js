@@ -17,8 +17,21 @@ function requireConfigured() {
  * Starts a Chapa checkout session. Returns { checkout_url } on success.
  * Throws on any failure — never returns a fabricated success.
  */
-async function initializePayment({ amount, email, firstName, lastName, txRef, returnUrl }) {
+async function initializePayment({ amount, email, firstName, lastName, txRef, returnUrl, subaccountId }) {
   requireConfigured();
+
+  const body = {
+    amount: String(amount),
+    currency: "ETB",
+    email,
+    first_name: firstName,
+    last_name: lastName,
+    tx_ref: txRef,
+    return_url: returnUrl,
+  };
+  // If the worker has a linked bank subaccount, Chapa automatically routes
+  // their share straight to their bank at settlement — no manual payout needed.
+  if (subaccountId) body.subaccount = { id: subaccountId };
 
   const res = await fetch(`${CHAPA_BASE}/transaction/initialize`, {
     method: "POST",
@@ -26,15 +39,7 @@ async function initializePayment({ amount, email, firstName, lastName, txRef, re
       Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      amount: String(amount),
-      currency: "ETB",
-      email,
-      first_name: firstName,
-      last_name: lastName,
-      tx_ref: txRef,
-      return_url: returnUrl,
-    }),
+    body: JSON.stringify(body),
   });
 
   const data = await res.json();
@@ -80,4 +85,47 @@ async function verifyPayment(txRef) {
   };
 }
 
-module.exports = { initializePayment, verifyPayment };
+/**
+ * Returns Chapa's current list of supported banks: [{ id, name, ... }].
+ * Fetched live rather than hardcoded, since bank codes can change.
+ */
+async function getBanks() {
+  requireConfigured();
+  const res = await fetch(`${CHAPA_BASE}/banks`, {
+    headers: { Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}` },
+  });
+  const data = await res.json();
+  if (data.status !== "success") throw new Error(data.message || "Could not load bank list from Chapa");
+  return data.data;
+}
+
+/**
+ * Creates (or the caller may choose to re-create) a Chapa subaccount for a
+ * worker's bank details, used later to automatically route their share of a
+ * payment straight to their bank via split payments. Returns the subaccount id.
+ */
+async function createSubaccount({ businessName, bankCode, accountNumber, accountName, splitValue }) {
+  requireConfigured();
+  const res = await fetch(`${CHAPA_BASE}/subaccount`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      business_name: businessName,
+      account_name: accountName,
+      bank_code: bankCode,
+      account_number: accountNumber,
+      split_type: "percentage",
+      split_value: splitValue,
+    }),
+  });
+  const data = await res.json();
+  if (data.status !== "success" || !data.data?.subaccount_id) {
+    throw new Error(flattenChapaError(data));
+  }
+  return data.data.subaccount_id;
+}
+
+module.exports = { initializePayment, verifyPayment, getBanks, createSubaccount };

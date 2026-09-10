@@ -75,6 +75,11 @@ CREATE TABLE worker_profiles (
   service_radius_km        NUMERIC(5,2) DEFAULT 10,
   base_latitude            NUMERIC(9,6),
   base_longitude           NUMERIC(9,6),
+  bank_code                VARCHAR(20),
+  bank_name                VARCHAR(100),
+  account_number           VARCHAR(50),
+  account_name             VARCHAR(150),
+  chapa_subaccount_id      VARCHAR(100),           -- set once their bank details are saved and Chapa confirms the subaccount
   verification_status      VARCHAR(20) NOT NULL DEFAULT 'unverified'
                              CHECK (verification_status IN ('unverified', 'pending', 'verified', 'rejected')),
   is_available             BOOLEAN NOT NULL DEFAULT true,
