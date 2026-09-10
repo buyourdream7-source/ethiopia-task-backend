@@ -89,28 +89,47 @@ router.post("/bookings/:id/initiate", requireAuth, requireRole("customer"), asyn
   if (!amount || amount <= 0) {
     return res.status(400).json({ error: "Could not determine a valid amount to charge" });
   }
+  if (!booking.email) {
+    return res.status(400).json({ error: "An email address is required for online payment.", code: "EMAIL_REQUIRED" });
+  }
 
-  // Reuse an existing pending payment of this type/amount if one's already there
-  // (e.g. the customer backed out of checkout and is trying again), otherwise create one.
+  // If there's already a pending payment attempt for this booking/type, check
+  // with Chapa FIRST rather than blindly reusing its reference — Chapa
+  // rejects re-initializing a tx_ref that was already used, and if the
+  // customer actually completed that earlier checkout but our webhook/return
+  // polling missed it, this recovers that instead of erroring out.
   const { rows: existing } = await db.query(
     `SELECT * FROM payments WHERE booking_id = $1 AND payment_type = $2 AND status = 'pending' ORDER BY created_at DESC LIMIT 1`,
     [booking.id, expectedType]
   );
-  let payment = existing[0];
-  const txRef = payment?.tx_ref || `ysr_${booking.id.slice(0, 8)}_${crypto.randomBytes(4).toString("hex")}`;
+  let payment = null;
 
-  if (!payment) {
-    const { rows: inserted } = await db.query(
-      `INSERT INTO payments (booking_id, payment_type, amount, status, provider, tx_ref)
-       VALUES ($1, $2, $3, 'pending', 'chapa', $4) RETURNING *`,
-      [booking.id, expectedType, amount, txRef]
-    );
-    payment = inserted[0];
+  if (existing[0]) {
+    try {
+      const result = await verifyPayment(existing[0].tx_ref);
+      if (result.success) {
+        await applyConfirmedPayment(existing[0]);
+        return res.json({ already_paid: true });
+      }
+      // Not successful — this reference can't be reused with Chapa, so retire
+      // it and fall through to create a fresh one below.
+      await db.query("UPDATE payments SET status = 'failed', updated_at = now() WHERE id = $1", [existing[0].id]);
+    } catch (e) {
+      if (e.code === "PAYMENT_NOT_CONFIGURED") return res.status(503).json({ error: e.message, code: e.code });
+      // Verification itself failed (network hiccup, etc.) — safest is to
+      // retire this attempt and start a clean one rather than risk reusing it.
+      await db.query("UPDATE payments SET status = 'failed', updated_at = now() WHERE id = $1", [existing[0].id]);
+    }
   }
 
-  if (!booking.email) {
-    return res.status(400).json({ error: "An email address is required for online payment.", code: "EMAIL_REQUIRED" });
-  }
+  const txRef = `ysr_${booking.id.slice(0, 8)}_${crypto.randomBytes(4).toString("hex")}`;
+  const { rows: inserted } = await db.query(
+    `INSERT INTO payments (booking_id, payment_type, amount, status, provider, tx_ref)
+     VALUES ($1, $2, $3, 'pending', 'chapa', $4) RETURNING *`,
+    [booking.id, expectedType, amount, txRef]
+  );
+  payment = inserted[0];
+
   const email = booking.email;
   const [firstName, ...rest] = (booking.full_name || "Customer").split(" ");
 
