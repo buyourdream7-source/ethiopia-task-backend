@@ -7,7 +7,7 @@ const { notify } = require("../utils/notify");
 
 const router = express.Router();
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "https://ethiopia-task-frontend-production.up.railway.app/";
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
 // Applies the real, database-level side effects of a confirmed payment.
 // Called from both the webhook and the polling endpoint — either one might
@@ -108,7 +108,10 @@ router.post("/bookings/:id/initiate", requireAuth, requireRole("customer"), asyn
     payment = inserted[0];
   }
 
-  const email = booking.email || `${booking.phone.replace(/\D/g, "")}@ysr-users.app`;
+  if (!booking.email) {
+    return res.status(400).json({ error: "An email address is required for online payment.", code: "EMAIL_REQUIRED" });
+  }
+  const email = booking.email;
   const [firstName, ...rest] = (booking.full_name || "Customer").split(" ");
 
   // TEST MODE — only active if PAYMENT_TEST_MODE=true is explicitly set on the
