@@ -113,166 +113,191 @@ router.post("/", requireAuth, requireRole("customer"), async (req, res) => {
 
 // POST /api/bookings/:id/quote — worker submits a price after inspecting (variable-price only)
 router.post("/:id/quote", requireAuth, requireRole("worker"), async (req, res) => {
-  const { amount, labor_amount, materials_amount, note } = req.body;
-  const ctx = await loadBookingForUser(req.params.id, req.user);
-  if (!ctx || !ctx.isWorker) return res.status(404).json({ error: "Booking not found" });
-  const { booking } = ctx;
+  try {
+    const { amount, labor_amount, materials_amount, note } = req.body;
+    const ctx = await loadBookingForUser(req.params.id, req.user);
+    if (!ctx || !ctx.isWorker) return res.status(404).json({ error: "Booking not found" });
+    const { booking } = ctx;
 
-  if (booking.pricing_type !== "variable") {
-    return res.status(400).json({ error: "This category has fixed pricing — no quote is needed" });
-  }
-  if (booking.status !== "started") {
-    return res.status(400).json({ error: `Cannot submit a quote while the booking is '${booking.status}'` });
-  }
-  if (!amount || amount <= 0) {
-    return res.status(400).json({ error: "A valid amount is required" });
-  }
+    if (booking.pricing_type !== "variable") {
+      return res.status(400).json({ error: "This category has fixed pricing — no quote is needed" });
+    }
+    if (booking.status !== "started") {
+      return res.status(400).json({ error: `Cannot submit a quote while the booking is '${booking.status}'` });
+    }
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: "A valid amount is required" });
+    }
 
-  await db.query(
-    `UPDATE bookings SET status = 'quote_sent', quote_amount = $1, quote_labor_amount = $2,
-       quote_materials_amount = $3, quote_note = $4, quote_status = 'pending',
-       quote_submitted_at = now(), updated_at = now()
-     WHERE id = $5`,
-    [amount, labor_amount || null, materials_amount || null, note || null, booking.id]
-  );
-  await db.query(
-    "INSERT INTO booking_status_history (booking_id, status, changed_by, note) VALUES ($1,'quote_sent',$2,$3)",
-    [booking.id, req.user.id, note || null]
-  );
+    await db.query(
+      `UPDATE bookings SET status = 'quote_sent', quote_amount = $1, quote_labor_amount = $2,
+         quote_materials_amount = $3, quote_note = $4, quote_status = 'pending',
+         quote_submitted_at = now(), updated_at = now()
+       WHERE id = $5`,
+      [amount, labor_amount || null, materials_amount || null, note || null, booking.id]
+    );
+    await db.query(
+      "INSERT INTO booking_status_history (booking_id, status, changed_by, note) VALUES ($1,'quote_sent',$2,$3)",
+      [booking.id, req.user.id, note || null]
+    );
 
-  const { rows } = await db.query("SELECT * FROM bookings WHERE id = $1", [booking.id]);
-  await notify(booking.customer_id, "New quote", `Your worker sent a quote of ${amount} ETB — review it in Bookings.`, booking.id);
-  res.json(rows[0]);
+    const { rows } = await db.query("SELECT * FROM bookings WHERE id = $1", [booking.id]);
+    await notify(booking.customer_id, "New quote", `Your worker sent a quote of ${amount} ETB — review it in Bookings.`, booking.id);
+    res.json(rows[0]);
+  } catch (err) {
+    console.error("POST /:id/quote crashed:", err);
+    res.status(500).json({ error: "Could not submit quote. Please try again." });
+  }
 });
 
 // PATCH /api/bookings/:id/quote — customer approves or rejects the worker's quote
 router.patch("/:id/quote", requireAuth, requireRole("customer"), async (req, res) => {
-  const { decision } = req.body; // 'approved' | 'rejected'
-  const ctx = await loadBookingForUser(req.params.id, req.user);
-  if (!ctx || !ctx.isCustomer) return res.status(404).json({ error: "Booking not found" });
-  const { booking } = ctx;
+  try {
+    const { decision } = req.body; // 'approved' | 'rejected'
+    const ctx = await loadBookingForUser(req.params.id, req.user);
+    if (!ctx || !ctx.isCustomer) return res.status(404).json({ error: "Booking not found" });
+    const { booking } = ctx;
 
-  if (booking.status !== "quote_sent") {
-    return res.status(400).json({ error: `No quote awaiting a decision (booking status: ${booking.status})` });
-  }
-  if (!["approved", "rejected"].includes(decision)) {
-    return res.status(400).json({ error: "decision must be 'approved' or 'rejected'" });
-  }
+    if (booking.status !== "quote_sent") {
+      return res.status(400).json({ error: `No quote awaiting a decision (booking status: ${booking.status})` });
+    }
+    if (!["approved", "rejected"].includes(decision)) {
+      return res.status(400).json({ error: "decision must be 'approved' or 'rejected'" });
+    }
 
-  if (decision === "approved") {
-    // Approval alone does NOT charge anything or lock the price yet — that only
-    // happens once the final payment actually clears (see payments.js). This
-    // is what guarantees a worker can never move the price after this point.
+    if (decision === "approved") {
+      // Approval alone does NOT charge anything or lock the price yet — that only
+      // happens once the final payment actually clears (see payments.js). This
+      // is what guarantees a worker can never move the price after this point.
+      await db.query(
+        `UPDATE bookings SET status = 'pending_final_payment', quote_status = 'approved',
+           quote_approved_at = now(), updated_at = now()
+         WHERE id = $1`,
+        [booking.id]
+      );
+    } else {
+      // Rejected — back to 'started' so the worker can submit a revised quote.
+      await db.query(
+        `UPDATE bookings SET status = 'started', quote_status = 'rejected', updated_at = now()
+         WHERE id = $1`,
+        [booking.id]
+      );
+    }
+
     await db.query(
-      `UPDATE bookings SET status = 'pending_final_payment', quote_status = 'approved',
-         quote_approved_at = now(), updated_at = now()
-       WHERE id = $1`,
-      [booking.id]
+      "INSERT INTO booking_status_history (booking_id, status, changed_by) VALUES ($1,$2,$3)",
+      [booking.id, decision === "approved" ? "quote_approved" : "quote_rejected", req.user.id]
     );
-  } else {
-    // Rejected — back to 'started' so the worker can submit a revised quote.
-    await db.query(
-      `UPDATE bookings SET status = 'started', quote_status = 'rejected', updated_at = now()
-       WHERE id = $1`,
-      [booking.id]
-    );
+
+    const { rows: w } = await db.query("SELECT user_id FROM worker_profiles WHERE id = $1", [booking.worker_id]);
+    if (w.length) {
+      if (decision === "approved") await notify(w[0].user_id, "Quote approved", "The customer approved your quote and is completing payment.", booking.id);
+      else await notify(w[0].user_id, "Quote rejected", "The customer rejected your quote — you can submit a new one.", booking.id);
+    }
+
+    const { rows } = await db.query("SELECT * FROM bookings WHERE id = $1", [booking.id]);
+    res.json(rows[0]);
+  } catch (err) {
+    console.error("PATCH /:id/quote crashed:", err);
+    res.status(500).json({ error: "Could not process your decision. Please try again." });
   }
-
-  await db.query(
-    "INSERT INTO booking_status_history (booking_id, status, changed_by) VALUES ($1,$2,$3)",
-    [booking.id, decision === "approved" ? "quote_approved" : "quote_rejected", req.user.id]
-  );
-
-  const { rows: w } = await db.query("SELECT user_id FROM worker_profiles WHERE id = $1", [booking.worker_id]);
-  if (w.length) {
-    if (decision === "approved") await notify(w[0].user_id, "Quote approved", "The customer approved your quote and is completing payment.", booking.id);
-    else await notify(w[0].user_id, "Quote rejected", "The customer rejected your quote — you can submit a new one.", booking.id);
-  }
-
-  const { rows } = await db.query("SELECT * FROM bookings WHERE id = $1", [booking.id]);
-  res.json(rows[0]);
 });
 
 // GET /api/bookings — list bookings for the logged-in user (customer or worker)
 router.get("/", requireAuth, async (req, res) => {
-  let sql, params;
-  if (req.user.role === "worker") {
-    sql = `SELECT b.*, u.full_name AS customer_name, c.name_en AS category_name
-           FROM bookings b
-           JOIN worker_profiles wp ON wp.id = b.worker_id
-           JOIN users u ON u.id = b.customer_id
-           JOIN categories c ON c.id = b.category_id
-           WHERE wp.user_id = $1 ORDER BY b.created_at DESC`;
-    params = [req.user.id];
-  } else {
-    sql = `SELECT b.*, wu.full_name AS worker_name, c.name_en AS category_name,
-                  EXISTS (SELECT 1 FROM reviews r WHERE r.booking_id = b.id) AS has_review
-           FROM bookings b
-           JOIN worker_profiles wp ON wp.id = b.worker_id
-           JOIN users wu ON wu.id = wp.user_id
-           JOIN categories c ON c.id = b.category_id
-           WHERE b.customer_id = $1 ORDER BY b.created_at DESC`;
-    params = [req.user.id];
+  try {
+    let sql, params;
+    if (req.user.role === "worker") {
+      sql = `SELECT b.*, u.full_name AS customer_name, c.name_en AS category_name
+             FROM bookings b
+             JOIN worker_profiles wp ON wp.id = b.worker_id
+             JOIN users u ON u.id = b.customer_id
+             JOIN categories c ON c.id = b.category_id
+             WHERE wp.user_id = $1 ORDER BY b.created_at DESC`;
+      params = [req.user.id];
+    } else {
+      sql = `SELECT b.*, wu.full_name AS worker_name, c.name_en AS category_name,
+                    EXISTS (SELECT 1 FROM reviews r WHERE r.booking_id = b.id) AS has_review
+             FROM bookings b
+             JOIN worker_profiles wp ON wp.id = b.worker_id
+             JOIN users wu ON wu.id = wp.user_id
+             JOIN categories c ON c.id = b.category_id
+             WHERE b.customer_id = $1 ORDER BY b.created_at DESC`;
+      params = [req.user.id];
+    }
+    const { rows } = await db.query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    console.error("GET / (bookings list) crashed:", err);
+    res.status(500).json({ error: "Could not load bookings. Please try again." });
   }
-  const { rows } = await db.query(sql, params);
-  res.json(rows);
 });
 
 router.get("/:id", requireAuth, async (req, res) => {
-  const ctx = await loadBookingForUser(req.params.id, req.user);
-  if (!ctx) return res.status(404).json({ error: "Booking not found" });
+  try {
+    const ctx = await loadBookingForUser(req.params.id, req.user);
+    if (!ctx) return res.status(404).json({ error: "Booking not found" });
 
-  const { rows: history } = await db.query(
-    "SELECT * FROM booking_status_history WHERE booking_id = $1 ORDER BY changed_at ASC",
-    [req.params.id]
-  );
-  const { rows: payments } = await db.query(
-    "SELECT * FROM payments WHERE booking_id = $1 ORDER BY created_at ASC",
-    [req.params.id]
-  );
+    const { rows: history } = await db.query(
+      "SELECT * FROM booking_status_history WHERE booking_id = $1 ORDER BY changed_at ASC",
+      [req.params.id]
+    );
+    const { rows: payments } = await db.query(
+      "SELECT * FROM payments WHERE booking_id = $1 ORDER BY created_at ASC",
+      [req.params.id]
+    );
 
-  res.json({ ...ctx.booking, history, payments });
+    res.json({ ...ctx.booking, history, payments });
+  } catch (err) {
+    console.error("GET /:id crashed:", err);
+    res.status(500).json({ error: "Could not load booking. Please try again." });
+  }
 });
 
 // GET /api/bookings/:id/receipt — a clean digital receipt for a confirmed job
 router.get("/:id/receipt", requireAuth, async (req, res) => {
-  const ctx = await loadBookingForUser(req.params.id, req.user);
-  if (!ctx) return res.status(404).json({ error: "Booking not found" });
-  const { booking } = ctx;
+  try {
+    const ctx = await loadBookingForUser(req.params.id, req.user);
+    if (!ctx) return res.status(404).json({ error: "Booking not found" });
+    const { booking } = ctx;
 
-  if (booking.status !== "confirmed") {
-    return res.status(400).json({ error: "A receipt is only available once a job is confirmed" });
+    if (booking.status !== "confirmed") {
+      return res.status(400).json({ error: "A receipt is only available once a job is confirmed" });
+    }
+
+    const { rows: payments } = await db.query(
+      "SELECT payment_type, amount, status, created_at AS paid_at, provider FROM payments WHERE booking_id = $1 AND status = 'paid' ORDER BY created_at ASC",
+      [booking.id]
+    );
+
+    const { rows: details } = await db.query(
+      `SELECT b.*, c.name_en AS category_name, cu.full_name AS customer_name, wu.full_name AS worker_name
+       FROM bookings b
+       JOIN categories c ON c.id = b.category_id
+       JOIN users cu ON cu.id = b.customer_id
+       JOIN worker_profiles wp ON wp.id = b.worker_id
+       JOIN users wu ON wu.id = wp.user_id
+       WHERE b.id = $1`,
+      [booking.id]
+    );
+
+    res.json({
+      booking_id: booking.id,
+      category: details[0].category_name,
+      customer_name: details[0].customer_name,
+      worker_name: details[0].worker_name,
+      pricing_type: booking.pricing_type,
+      payments,
+      total_paid: payments.reduce((sum, p) => sum + Number(p.amount), 0),
+      commission_rate: booking.commission_rate,
+      commission_amount: booking.commission_amount,
+      worker_earnings: booking.worker_earnings,
+      confirmed_at: booking.updated_at,
+    });
+  } catch (err) {
+    console.error("GET /:id/receipt crashed:", err);
+    res.status(500).json({ error: "Could not load receipt. Please try again." });
   }
-
-  const { rows: payments } = await db.query(
-    "SELECT payment_type, amount, status, created_at AS paid_at, provider FROM payments WHERE booking_id = $1 AND status = 'paid' ORDER BY created_at ASC",
-    [booking.id]
-  );
-
-  const { rows: details } = await db.query(
-    `SELECT b.*, c.name_en AS category_name, cu.full_name AS customer_name, wu.full_name AS worker_name
-     FROM bookings b
-     JOIN categories c ON c.id = b.category_id
-     JOIN users cu ON cu.id = b.customer_id
-     JOIN worker_profiles wp ON wp.id = b.worker_id
-     JOIN users wu ON wu.id = wp.user_id
-     WHERE b.id = $1`,
-    [booking.id]
-  );
-
-  res.json({
-    booking_id: booking.id,
-    category: details[0].category_name,
-    customer_name: details[0].customer_name,
-    worker_name: details[0].worker_name,
-    pricing_type: booking.pricing_type,
-    payments,
-    total_paid: payments.reduce((sum, p) => sum + Number(p.amount), 0),
-    commission_rate: booking.commission_rate,
-    commission_amount: booking.commission_amount,
-    worker_earnings: booking.worker_earnings,
-    confirmed_at: booking.updated_at,
-  });
 });
 
 // PATCH /api/bookings/:id/status — move a booking through its lifecycle
