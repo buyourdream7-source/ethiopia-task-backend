@@ -69,6 +69,9 @@ router.post("/login", async (req, res) => {
     if (user.is_suspended) {
       return res.status(403).json({ error: "This account has been suspended. Contact support." });
     }
+    if (user.is_deleted) {
+      return res.status(401).json({ error: "Phone number or password incorrect" });
+    }
 
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) {

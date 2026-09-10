@@ -12,6 +12,7 @@ const messageRoutes = require("./routes/messages");
 const adminRoutes = require("./routes/admin");
 const paymentRoutes = require("./routes/payments");
 const notificationRoutes = require("./routes/notifications");
+const publicPagesRoutes = require("./routes/publicPages");
 
 const app = express();
 
@@ -20,6 +21,8 @@ app.use(cors({ origin: corsOrigin === "*" ? true : corsOrigin.split(",") }));
 app.use(express.json({ limit: "8mb" })); // raised from default 100kb to fit base64 document uploads
 
 app.get("/health", (req, res) => res.json({ ok: true }));
+
+app.use("/", publicPagesRoutes);
 
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
@@ -38,7 +41,7 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Something went wrong" });
 });
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Ethiopia Task API listening on port ${PORT}`);
 });

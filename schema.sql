@@ -145,7 +145,7 @@ CREATE TABLE bookings (
   customer_id         UUID NOT NULL REFERENCES users(id),
   worker_id           UUID NOT NULL REFERENCES worker_profiles(id),
   category_id         UUID NOT NULL REFERENCES categories(id),
-  status              VARCHAR(20) NOT NULL DEFAULT 'pending_payment'
+  status              VARCHAR(30) NOT NULL DEFAULT 'pending_payment'
                         CHECK (status IN ('pending_payment', 'requested', 'accepted', 'on_the_way', 'started',
                                            'quote_sent', 'quote_approved', 'pending_final_payment', 'in_progress',
                                            'completed', 'confirmed', 'cancelled', 'disputed')),
@@ -181,7 +181,7 @@ CREATE INDEX idx_bookings_status ON bookings(status);
 CREATE TABLE booking_status_history (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   booking_id   UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
-  status       VARCHAR(20) NOT NULL,
+  status       VARCHAR(30) NOT NULL,
   changed_by   UUID REFERENCES users(id),
   note         TEXT,
   changed_at   TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -296,4 +296,5 @@ INSERT INTO categories (slug, name_en, name_am, icon_key, sort_order, requires_l
   ('construction', 'Construction', 'ግንባታ', 'hard-hat', 11, true, 'variable'),
   ('moving', 'Moving Services', 'ማዛወሪያ', 'truck', 12, false, 'fixed'),
   ('personal_trainer', 'Personal Trainer', 'የግል አሰልጣኝ', 'dumbbell', 13, true, 'fixed'),
-  ('teacher', 'Teacher', 'መምህር', 'graduation-cap', 14, true, 'fixed');
+  ('teacher', 'Teacher', 'መምህር', 'graduation-cap', 14, true, 'fixed'),
+  ('tv_satellite', 'TV/Satellite Service', 'ቲቪ/ሳተላይት አገልግሎት', 'tv', 15, false, 'fixed');
