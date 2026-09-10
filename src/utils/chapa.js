@@ -39,9 +39,22 @@ async function initializePayment({ amount, email, firstName, lastName, txRef, re
 
   const data = await res.json();
   if (data.status !== "success" || !data.data?.checkout_url) {
-    throw new Error(data.message || "Chapa failed to start the payment session");
+    throw new Error(flattenChapaError(data));
   }
   return { checkoutUrl: data.data.checkout_url };
+}
+
+// Chapa sometimes returns validation errors as an object of field arrays
+// (e.g. { email: ["The email field is required."] }) rather than a plain
+// string — this always produces readable text either way.
+function flattenChapaError(data) {
+  const msg = data?.message;
+  if (typeof msg === "string") return msg;
+  if (msg && typeof msg === "object") {
+    const parts = Object.entries(msg).map(([field, errs]) => `${field}: ${[].concat(errs).join(", ")}`);
+    if (parts.length) return parts.join(" | ");
+  }
+  return "Chapa failed to start the payment session";
 }
 
 /**

@@ -7,7 +7,7 @@ const { notify } = require("../utils/notify");
 
 const router = express.Router();
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://ethiopia-task-frontend-production.up.railway.app/";
 
 // Applies the real, database-level side effects of a confirmed payment.
 // Called from both the webhook and the polling endpoint — either one might
