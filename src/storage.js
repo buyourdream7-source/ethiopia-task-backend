@@ -44,7 +44,16 @@ async function uploadImage(dataUri, { folder = "ysr", isPrivate = false } = {}) 
   requireConfigured();
 
   const timestamp = Math.floor(Date.now() / 1000);
-  const signature = sign({ folder, timestamp });
+
+  // Documents get access_control: restricted, which blocks public URL access
+  // (confirmed against Cloudinary's own Media Library setting of the same
+  // name). Profile photos stay public.
+  const accessControl = isPrivate ? JSON.stringify([{ access_type: "token" }]) : null;
+
+  const signedParams = { folder, timestamp };
+  if (accessControl) signedParams.access_control = accessControl;
+
+  const signature = sign(signedParams);
 
   const form = new URLSearchParams({
     file: dataUri,
@@ -53,6 +62,7 @@ async function uploadImage(dataUri, { folder = "ysr", isPrivate = false } = {}) 
     folder,
     signature,
   });
+  if (accessControl) form.set("access_control", accessControl);
 
   const res = await fetch(
     `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload`,
@@ -73,58 +83,7 @@ async function uploadImage(dataUri, { folder = "ysr", isPrivate = false } = {}) 
     throw new Error(data.error?.message || "Upload failed");
   }
 
-  // Passing `type` at upload time does not reliably produce a private asset,
-  // so for documents we follow up with an explicit conversion to
-  // "authenticated" delivery. Verified below — if this step fails we throw
-  // rather than silently leaving an ID document publicly readable.
-  if (isPrivate) {
-    const converted = await makePrivate(data.public_id);
-    return { url: converted.secure_url, publicId: converted.public_id };
-  }
-
   return { url: data.secure_url, publicId: data.public_id };
-}
-
-/**
- * Converts an already-uploaded asset to "authenticated" delivery, which means
- * it can no longer be fetched without a signed URL.
- */
-async function makePrivate(publicId) {
-  const timestamp = Math.floor(Date.now() / 1000);
-  // Cloudinary's rename endpoint requires both from_ and to_public_id even
-  // when the id isn't changing — we're only changing the delivery type here.
-  const params = {
-    from_public_id: publicId,
-    timestamp,
-    to_public_id: publicId,
-    to_type: "authenticated",
-    type: "upload",
-  };
-  const signature = sign(params);
-
-  const form = new URLSearchParams({
-    ...Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])),
-    api_key: process.env.CLOUDINARY_API_KEY,
-    signature,
-  });
-
-  const res = await fetch(
-    `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/image/rename`,
-    { method: "POST", body: form }
-  );
-
-  const raw = await res.text();
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    throw new Error(`Could not secure the uploaded document (${res.status}).`);
-  }
-
-  if (!data.secure_url) {
-    throw new Error(data.error?.message || "Could not secure the uploaded document.");
-  }
-  return data;
 }
 
 /**
