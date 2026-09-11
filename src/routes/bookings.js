@@ -47,6 +47,15 @@ router.post("/", requireAuth, requireRole("customer"), async (req, res) => {
   }
 
   try {
+    // Expire a paid subscription whose period has ended. Admin-activated
+    // subscriptions have no expiry date and are left alone.
+    await db.query(
+      `UPDATE users SET subscription_active = false, updated_at = now()
+       WHERE id = $1 AND subscription_active = true
+         AND subscription_expires_at IS NOT NULL AND subscription_expires_at < now()`,
+      [req.user.id]
+    );
+
     const { rows: userRows } = await db.query("SELECT subscription_active FROM users WHERE id = $1", [req.user.id]);
     if (!userRows[0].subscription_active) {
       const { rows: countRows } = await db.query(

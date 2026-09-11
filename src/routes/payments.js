@@ -253,20 +253,155 @@ router.post("/chapa/webhook", async (req, res) => {
   if (!txRef) return res.status(400).json({ error: "tx_ref missing" });
 
   try {
+    // A tx_ref belongs to either a job payment or a subscription payment —
+    // check both tables before giving up.
     const { rows } = await db.query("SELECT * FROM payments WHERE tx_ref = $1", [txRef]);
-    if (!rows.length) return res.status(404).json({ error: "Unknown tx_ref" });
-    const payment = rows[0];
-
-    const result = await verifyPayment(txRef);
-    if (result.success) {
-      await applyConfirmedPayment(payment);
-    } else {
-      await applyFailedPayment(payment);
+    if (rows.length) {
+      const result = await verifyPayment(txRef);
+      if (result.success) await applyConfirmedPayment(rows[0]);
+      else await applyFailedPayment(rows[0]);
+      return res.json({ ok: true });
     }
-    res.json({ ok: true });
+
+    const { rows: subRows } = await db.query("SELECT * FROM subscription_payments WHERE tx_ref = $1", [txRef]);
+    if (subRows.length) {
+      const result = await verifyPayment(txRef);
+      if (result.success) {
+        await applyConfirmedSubscription(subRows[0]);
+      } else if (subRows[0].status === "pending") {
+        await db.query("UPDATE subscription_payments SET status = 'failed', updated_at = now() WHERE id = $1", [subRows[0].id]);
+      }
+      return res.json({ ok: true });
+    }
+
+    res.status(404).json({ error: "Unknown tx_ref" });
   } catch (e) {
     console.error("Chapa webhook error:", e.message);
     res.status(500).json({ error: "Webhook processing failed" });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Subscription payments
+//
+// Separate from job payments: a customer pays a flat monthly fee to keep
+// booking after their free jobs run out. Same Chapa flow as everything else —
+// nothing is marked paid until Chapa itself confirms it.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Applies the effects of a confirmed subscription payment. Safe to run twice.
+async function applyConfirmedSubscription(payment) {
+  if (payment.status === "paid") return;
+
+  await db.query("UPDATE subscription_payments SET status = 'paid', updated_at = now() WHERE id = $1", [payment.id]);
+
+  // Extend from the later of (now) or (their current expiry) so paying early
+  // adds to the existing period rather than shortening it.
+  await db.query(
+    `UPDATE users SET
+       subscription_active = true,
+       subscription_expires_at = GREATEST(COALESCE(subscription_expires_at, now()), now()) + ($1 || ' days')::interval,
+       updated_at = now()
+     WHERE id = $2`,
+    [payment.period_days, payment.user_id]
+  );
+
+  await notify(payment.user_id, "Subscription active", "Your subscription is active — you can keep booking workers.");
+}
+
+// POST /api/payments/subscription/initiate — start a subscription payment
+router.post("/subscription/initiate", requireAuth, requireRole("customer"), async (req, res) => {
+  try {
+    const { rows: userRows } = await db.query(
+      "SELECT id, full_name, email, phone FROM users WHERE id = $1",
+      [req.user.id]
+    );
+    const user = userRows[0];
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (!user.email) {
+      return res.status(400).json({ error: "An email address is required for online payment.", code: "EMAIL_REQUIRED" });
+    }
+
+    const { rows: settings } = await db.query(
+      "SELECT value FROM platform_settings WHERE key = 'subscription_price_etb'"
+    );
+    const amount = Number(settings[0]?.value || 811.75);
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: "Subscription price isn't configured" });
+    }
+
+    // Same recovery logic as job payments: check any existing pending attempt
+    // with Chapa before creating a new one, since a tx_ref can't be reused.
+    const { rows: existing } = await db.query(
+      "SELECT * FROM subscription_payments WHERE user_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+      [req.user.id]
+    );
+    if (existing[0]) {
+      try {
+        const result = await verifyPayment(existing[0].tx_ref);
+        if (result.success) {
+          await applyConfirmedSubscription(existing[0]);
+          return res.json({ already_paid: true });
+        }
+        await db.query("UPDATE subscription_payments SET status = 'failed', updated_at = now() WHERE id = $1", [existing[0].id]);
+      } catch (e) {
+        if (e.code === "PAYMENT_NOT_CONFIGURED") return res.status(503).json({ error: e.message, code: e.code });
+        await db.query("UPDATE subscription_payments SET status = 'failed', updated_at = now() WHERE id = $1", [existing[0].id]);
+      }
+    }
+
+    const txRef = `ysrsub_${req.user.id.slice(0, 8)}_${crypto.randomBytes(4).toString("hex")}`;
+    await db.query(
+      "INSERT INTO subscription_payments (user_id, amount, status, provider, tx_ref) VALUES ($1,$2,'pending','chapa',$3)",
+      [req.user.id, amount, txRef]
+    );
+
+    const [firstName, ...rest] = (user.full_name || "Customer").split(" ");
+    try {
+      const { checkoutUrl } = await initializePayment({
+        amount,
+        email: user.email,
+        firstName,
+        lastName: rest.join(" ") || "-",
+        txRef,
+        returnUrl: `${FRONTEND_URL}?subscription_tx=${txRef}`,
+      });
+      res.json({ checkout_url: checkoutUrl, tx_ref: txRef, amount });
+    } catch (e) {
+      if (e.code === "PAYMENT_NOT_CONFIGURED") return res.status(503).json({ error: e.message, code: e.code });
+      res.status(502).json({ error: e.message });
+    }
+  } catch (e) {
+    console.error("POST /subscription/initiate crashed:", e);
+    res.status(500).json({ error: "Something went wrong starting your subscription payment." });
+  }
+});
+
+// GET /api/payments/subscription/status?tx_ref=... — polled after Chapa redirect
+router.get("/subscription/status", requireAuth, async (req, res) => {
+  try {
+    const { tx_ref } = req.query;
+    if (!tx_ref) return res.status(400).json({ error: "tx_ref is required" });
+
+    const { rows } = await db.query(
+      "SELECT * FROM subscription_payments WHERE tx_ref = $1 AND user_id = $2",
+      [tx_ref, req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Payment not found" });
+    const payment = rows[0];
+
+    if (payment.status === "paid") return res.json({ status: "paid" });
+
+    const result = await verifyPayment(tx_ref);
+    if (result.success) {
+      await applyConfirmedSubscription(payment);
+      return res.json({ status: "paid" });
+    }
+    return res.json({ status: "pending" });
+  } catch (e) {
+    if (e.code === "PAYMENT_NOT_CONFIGURED") return res.status(503).json({ error: e.message, code: e.code });
+    console.error("GET /subscription/status crashed:", e);
+    res.status(502).json({ error: e.message });
   }
 });
 

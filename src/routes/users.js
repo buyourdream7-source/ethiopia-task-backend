@@ -1,13 +1,15 @@
 const express = require("express");
+const bcrypt = require("bcryptjs");
 const db = require("../db");
 const { requireAuth } = require("../middleware/auth");
+const { deleteAccount } = require("../accountDeletion");
 
 const router = express.Router();
 
 router.get("/me", requireAuth, async (req, res) => {
   const { rows } = await db.query(
     `SELECT id, phone, email, full_name, role, preferred_language,
-            profile_photo_url, is_phone_verified, subscription_active, notifications_enabled, created_at
+            profile_photo_url, is_phone_verified, subscription_active, subscription_expires_at, notifications_enabled, created_at
      FROM users WHERE id = $1`,
     [req.user.id]
   );
@@ -73,6 +75,32 @@ router.post("/me/addresses", requireAuth, async (req, res) => {
     [req.user.id, label || null, city || "Addis Ababa", subcity || null, area_text, latitude, longitude, !!is_default]
   );
   res.status(201).json(rows[0]);
+});
+
+// PATCH /api/users/me/fcm-token — called once the app registers for push
+// notifications and gets a device token from Firebase.
+router.patch("/me/fcm-token", requireAuth, async (req, res) => {
+  const { fcm_token } = req.body;
+  if (!fcm_token) return res.status(400).json({ error: "fcm_token is required" });
+  await db.query("UPDATE users SET fcm_token = $1, updated_at = now() WHERE id = $2", [fcm_token, req.user.id]);
+  res.json({ ok: true });
+});
+
+// DELETE /api/users/me — requires the current password as confirmation.
+// Personal data is scrubbed; booking/payment history is kept (see
+// accountDeletion.js for why) so the other party's records stay intact.
+router.delete("/me", requireAuth, async (req, res) => {
+  const { password } = req.body;
+  if (!password) return res.status(400).json({ error: "Your current password is required to delete your account" });
+
+  const { rows } = await db.query("SELECT password_hash FROM users WHERE id = $1", [req.user.id]);
+  if (!rows.length) return res.status(404).json({ error: "User not found" });
+
+  const valid = await bcrypt.compare(password, rows[0].password_hash);
+  if (!valid) return res.status(401).json({ error: "Incorrect password" });
+
+  await deleteAccount(req.user.id);
+  res.json({ ok: true });
 });
 
 module.exports = router;
