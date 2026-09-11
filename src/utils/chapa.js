@@ -95,8 +95,14 @@ async function getBanks() {
     headers: { Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}` },
   });
   const data = await res.json();
-  if (data.status !== "success") throw new Error(data.message || "Could not load bank list from Chapa");
-  return data.data;
+  if (data.status !== "success") throw new Error(flattenChapaError(data));
+
+  // Chapa nests the actual list under `data`, but has returned it in a couple
+  // of shapes across versions — normalize to a plain array either way.
+  const list = Array.isArray(data.data) ? data.data
+    : Array.isArray(data.data?.data) ? data.data.data
+    : [];
+  return list;
 }
 
 /**
