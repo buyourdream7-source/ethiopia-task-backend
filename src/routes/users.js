@@ -23,10 +23,12 @@ router.get("/me", requireAuth, async (req, res) => {
     );
     user.free_jobs_used = Number(countRows[0].n);
 
-    const { rows: priceRows } = await db.query(
-      "SELECT value FROM platform_settings WHERE key = 'subscription_price_etb'"
+    const { rows: settingRows } = await db.query(
+      "SELECT key, value FROM platform_settings WHERE key IN ('subscription_price_etb', 'subscription_period_days')"
     );
-    user.subscription_price_etb = parseFloat(priceRows[0]?.value || "811.75");
+    const settingsMap = Object.fromEntries(settingRows.map((s) => [s.key, s.value]));
+    user.subscription_price_etb = parseFloat(settingsMap.subscription_price_etb || "811.75");
+    user.subscription_period_days = parseInt(settingsMap.subscription_period_days || "90", 10);
   }
 
   res.json(user);

@@ -323,9 +323,11 @@ router.post("/subscription/initiate", requireAuth, requireRole("customer"), asyn
     }
 
     const { rows: settings } = await db.query(
-      "SELECT value FROM platform_settings WHERE key = 'subscription_price_etb'"
+      "SELECT key, value FROM platform_settings WHERE key IN ('subscription_price_etb', 'subscription_period_days')"
     );
-    const amount = Number(settings[0]?.value || 811.75);
+    const settingsMap = Object.fromEntries(settings.map((s) => [s.key, s.value]));
+    const amount = Number(settingsMap.subscription_price_etb || 811.75);
+    const periodDays = Number(settingsMap.subscription_period_days || 90);
     if (!amount || amount <= 0) {
       return res.status(400).json({ error: "Subscription price isn't configured" });
     }
@@ -352,8 +354,8 @@ router.post("/subscription/initiate", requireAuth, requireRole("customer"), asyn
 
     const txRef = `ysrsub_${req.user.id.slice(0, 8)}_${crypto.randomBytes(4).toString("hex")}`;
     await db.query(
-      "INSERT INTO subscription_payments (user_id, amount, status, provider, tx_ref) VALUES ($1,$2,'pending','chapa',$3)",
-      [req.user.id, amount, txRef]
+      "INSERT INTO subscription_payments (user_id, amount, status, provider, tx_ref, period_days) VALUES ($1,$2,'pending','chapa',$3,$4)",
+      [req.user.id, amount, txRef, periodDays]
     );
 
     const [firstName, ...rest] = (user.full_name || "Customer").split(" ");
