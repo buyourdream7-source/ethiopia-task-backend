@@ -1,6 +1,7 @@
 const express = require("express");
 const db = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
+const { signedUrlFor } = require("../storage");
 
 const router = express.Router();
 router.use(requireAuth, requireRole("admin"));
@@ -31,7 +32,8 @@ router.get("/stats", async (req, res) => {
 router.get("/verifications", async (req, res) => {
   const { rows } = await db.query(
     `SELECT wp.id AS worker_id, u.full_name, u.phone, wp.verification_status, wp.created_at,
-            json_agg(json_build_object('id', vd.id, 'doc_type', vd.doc_type, 'status', vd.status, 'file_url', vd.file_url))
+            json_agg(json_build_object('id', vd.id, 'doc_type', vd.doc_type, 'status', vd.status,
+                                       'file_url', vd.file_url, 'storage_public_id', vd.storage_public_id))
               FILTER (WHERE vd.id IS NOT NULL) AS documents
      FROM worker_profiles wp
      JOIN users u ON u.id = wp.user_id
@@ -40,7 +42,20 @@ router.get("/verifications", async (req, res) => {
      GROUP BY wp.id, u.full_name, u.phone
      ORDER BY wp.updated_at ASC`
   );
-  res.json(rows);
+
+  // Documents are stored as private Cloudinary uploads, so the stored URL
+  // won't load on its own. Swap in a short-lived signed URL for viewing.
+  // Older documents (uploaded before private storage) have no public_id and
+  // keep their original URL.
+  const results = rows.map((row) => ({
+    ...row,
+    documents: (row.documents || []).map((d) => ({
+      ...d,
+      file_url: d.storage_public_id ? signedUrlFor(d.storage_public_id) : d.file_url,
+    })),
+  }));
+
+  res.json(results);
 });
 
 router.patch("/verifications/:workerId", async (req, res) => {
@@ -108,10 +123,10 @@ router.patch("/users/:id/suspend", async (req, res) => {
 
 router.get("/customers", async (req, res) => {
   const { rows } = await db.query(`
-    SELECT u.id, u.full_name, u.phone, u.subscription_active,
+    SELECT u.id, u.full_name, u.phone, u.subscription_active, u.is_suspended, u.payment_deadline,
       (SELECT COUNT(*) FROM bookings b WHERE b.customer_id = u.id AND b.status = 'confirmed') AS free_jobs_used
     FROM users u WHERE u.role = 'customer'
-    ORDER BY u.created_at DESC
+    ORDER BY u.is_suspended DESC, u.created_at DESC
   `);
   res.json(rows);
 });

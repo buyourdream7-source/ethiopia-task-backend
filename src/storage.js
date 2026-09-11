@@ -44,10 +44,10 @@ async function uploadImage(dataUri, { folder = "ysr", isPrivate = false } = {}) 
   requireConfigured();
 
   const timestamp = Math.floor(Date.now() / 1000);
-  const params = { folder, timestamp };
-  if (isPrivate) params.type = "authenticated";
-
-  const signature = sign(params);
+  // Only folder + timestamp get signed here. The delivery type is part of the
+  // endpoint URL, not a signed parameter — passing it as a form field (as an
+  // earlier version did) is silently ignored and the file uploads as public.
+  const signature = sign({ folder, timestamp });
 
   const form = new URLSearchParams({
     file: dataUri,
@@ -56,10 +56,13 @@ async function uploadImage(dataUri, { folder = "ysr", isPrivate = false } = {}) 
     folder,
     signature,
   });
-  if (isPrivate) form.set("type", "authenticated");
+
+  // "authenticated" files can't be fetched without a signed URL, which is what
+  // we want for ID/licence documents. "upload" is normal public delivery.
+  const deliveryType = isPrivate ? "authenticated" : "upload";
 
   const res = await fetch(
-    `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload`,
+    `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/image/${deliveryType}`,
     { method: "POST", body: form }
   );
   const data = await res.json();
@@ -70,4 +73,24 @@ async function uploadImage(dataUri, { folder = "ysr", isPrivate = false } = {}) 
   return { url: data.secure_url, publicId: data.public_id };
 }
 
-module.exports = { uploadImage };
+/**
+ * Builds a short-lived signed URL for an "authenticated" upload, so an admin
+ * can actually view a worker's document during verification. Without this, a
+ * private file can't be displayed anywhere.
+ *
+ * Pass the public_id Cloudinary returned at upload time.
+ */
+function signedUrlFor(publicId, { expiresInSeconds = 600 } = {}) {
+  requireConfigured();
+  const expiresAt = Math.floor(Date.now() / 1000) + expiresInSeconds;
+  const toSign = `${expiresAt}/${publicId}`;
+  const signature = crypto
+    .createHash("sha256")
+    .update(toSign + process.env.CLOUDINARY_API_SECRET)
+    .digest("base64url")
+    .slice(0, 32);
+
+  return `https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/image/authenticated/s--${signature}--/${publicId}`;
+}
+
+module.exports = { uploadImage, signedUrlFor };

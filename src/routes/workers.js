@@ -226,17 +226,19 @@ router.post("/me/documents", requireAuth, requireRole("worker"), async (req, res
     const { rows: wp } = await db.query("SELECT id FROM worker_profiles WHERE user_id = $1", [req.user.id]);
     if (!wp.length) return res.status(404).json({ error: "Worker profile not found" });
 
-    // The app sends a base64 data URI; upload it and keep only the URL.
+    // The app sends a base64 data URI; upload it and keep only the reference.
     let storedUrl = file_url;
+    let publicId = null;
     if (storedUrl.startsWith("data:")) {
-      const { url } = await uploadImage(storedUrl, { folder: "ysr/documents", isPrivate: true });
-      storedUrl = url;
+      const uploaded = await uploadImage(storedUrl, { folder: "ysr/documents", isPrivate: true });
+      storedUrl = uploaded.url;
+      publicId = uploaded.publicId;
     }
 
     const { rows } = await db.query(
-      `INSERT INTO verification_documents (worker_id, doc_type, file_url)
-       VALUES ($1,$2,$3) RETURNING id, doc_type, status, uploaded_at`,
-      [wp[0].id, doc_type, storedUrl]
+      `INSERT INTO verification_documents (worker_id, doc_type, file_url, storage_public_id)
+       VALUES ($1,$2,$3,$4) RETURNING id, doc_type, status, uploaded_at`,
+      [wp[0].id, doc_type, storedUrl, publicId]
     );
 
     // Move the worker into the verification queue once they've submitted something
