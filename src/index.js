@@ -16,6 +16,11 @@ const publicPagesRoutes = require("./routes/publicPages");
 
 const app = express();
 
+// Railway (like most hosts) puts a proxy in front of the app, so the client's
+// real IP arrives in X-Forwarded-For. Without this, rate limiting would either
+// warn or bucket every user under the proxy's single IP.
+app.set("trust proxy", 1);
+
 const corsOrigin = process.env.CORS_ORIGIN || "*";
 app.use(cors({ origin: corsOrigin === "*" ? true : corsOrigin.split(",") }));
 app.use(express.json({ limit: "8mb" })); // raised from default 100kb to fit base64 document uploads

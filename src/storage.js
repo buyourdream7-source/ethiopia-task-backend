@@ -91,9 +91,12 @@ async function uploadImage(dataUri, { folder = "ysr", isPrivate = false } = {}) 
  */
 async function makePrivate(publicId) {
   const timestamp = Math.floor(Date.now() / 1000);
+  // Cloudinary's rename endpoint requires both from_ and to_public_id even
+  // when the id isn't changing — we're only changing the delivery type here.
   const params = {
     from_public_id: publicId,
     timestamp,
+    to_public_id: publicId,
     to_type: "authenticated",
     type: "upload",
   };
