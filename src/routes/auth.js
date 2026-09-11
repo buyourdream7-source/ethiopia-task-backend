@@ -3,7 +3,6 @@ const bcrypt = require("bcryptjs");
 const db = require("../db");
 const { signToken } = require("../utils/jwt");
 const { requireAuth } = require("../middleware/auth");
-const { sendSms } = require("../utils/afromessage");
 
 const router = express.Router();
 
@@ -88,56 +87,16 @@ router.post("/login", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// Phone verification (OTP)
+// Phone verification (OTP) — DISABLED
 //
-// Sends the code via AfroMessage if AFROMESSAGE_TOKEN is set. If it's not
-// set yet, or the send fails for any reason (bad credentials, no credit,
-// network issue), falls back to returning the code directly as `dev_otp`
-// so testing/registration never gets fully blocked by an SMS issue.
+// Removed for now: no SMS provider credit yet, and OTP isn't needed at this
+// stage. New users are treated as verified (see migration_015).
+//
+// To re-enable later:
+//   1. Restore these routes from git history
+//   2. Set AFROMESSAGE_TOKEN + AFROMESSAGE_SENDER_NAME on Railway
+//   3. Restore PhoneVerificationGate in App.jsx
+//   4. ALTER TABLE users ALTER COLUMN is_phone_verified SET DEFAULT false;
 // ─────────────────────────────────────────────────────────────────────────
-router.post("/send-otp", requireAuth, async (req, res) => {
-  const code = String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-  await db.query("DELETE FROM phone_otps WHERE user_id = $1", [req.user.id]);
-  await db.query(
-    "INSERT INTO phone_otps (user_id, code, expires_at) VALUES ($1, $2, $3)",
-    [req.user.id, code, expiresAt]
-  );
-
-  let smsSent = false;
-  let smsError = null;
-  try {
-    await sendSms(req.user.phone, `Your Y S R verification code is ${code}`);
-    smsSent = true;
-  } catch (e) {
-    smsError = e.message;
-  }
-
-  const response = { sent: smsSent, expires_in_seconds: 600 };
-  if (!smsSent) {
-    response.dev_otp = code;
-    response.dev_note = smsError; // visible only in this fallback case, useful for debugging AfroMessage setup
-  }
-  res.json(response);
-});
-
-router.post("/verify-otp", requireAuth, async (req, res) => {
-  const { code } = req.body;
-  if (!code) return res.status(400).json({ error: "code is required" });
-
-  const { rows } = await db.query(
-    "SELECT * FROM phone_otps WHERE user_id = $1 AND code = $2 AND expires_at > now()",
-    [req.user.id, String(code)]
-  );
-  if (!rows.length) {
-    return res.status(400).json({ error: "That code is incorrect or has expired." });
-  }
-
-  await db.query("UPDATE users SET is_phone_verified = true, updated_at = now() WHERE id = $1", [req.user.id]);
-  await db.query("DELETE FROM phone_otps WHERE user_id = $1", [req.user.id]);
-
-  res.json({ verified: true });
-});
 
 module.exports = router;
