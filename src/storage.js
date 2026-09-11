@@ -44,10 +44,16 @@ async function uploadImage(dataUri, { folder = "ysr", isPrivate = false } = {}) 
   requireConfigured();
 
   const timestamp = Math.floor(Date.now() / 1000);
-  // Only folder + timestamp get signed here. The delivery type is part of the
-  // endpoint URL, not a signed parameter — passing it as a form field (as an
-  // earlier version did) is silently ignored and the file uploads as public.
-  const signature = sign({ folder, timestamp });
+
+  // Cloudinary's upload endpoint is always /image/upload. Private delivery is
+  // requested via the `type` parameter, which must be included in the
+  // signature — omitting it from the signature causes a rejected request, and
+  // putting it in the URL path hits a non-existent endpoint (which returns an
+  // HTML error page, not JSON).
+  const signedParams = { folder, timestamp };
+  if (isPrivate) signedParams.type = "authenticated";
+
+  const signature = sign(signedParams);
 
   const form = new URLSearchParams({
     file: dataUri,
@@ -56,16 +62,22 @@ async function uploadImage(dataUri, { folder = "ysr", isPrivate = false } = {}) 
     folder,
     signature,
   });
-
-  // "authenticated" files can't be fetched without a signed URL, which is what
-  // we want for ID/licence documents. "upload" is normal public delivery.
-  const deliveryType = isPrivate ? "authenticated" : "upload";
+  if (isPrivate) form.set("type", "authenticated");
 
   const res = await fetch(
-    `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/image/${deliveryType}`,
+    `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/image/upload`,
     { method: "POST", body: form }
   );
-  const data = await res.json();
+
+  // Cloudinary returns HTML (not JSON) for some failures — parsing blindly
+  // produces a confusing "Unexpected token '<'" error instead of the real cause.
+  const raw = await res.text();
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    throw new Error(`Upload failed (${res.status}). Check your Cloudinary credentials.`);
+  }
 
   if (!data.secure_url) {
     throw new Error(data.error?.message || "Upload failed");
