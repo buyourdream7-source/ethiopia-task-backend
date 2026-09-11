@@ -241,10 +241,13 @@ router.post("/me/documents", requireAuth, requireRole("worker"), async (req, res
       [wp[0].id, doc_type, storedUrl, publicId]
     );
 
-    // Move the worker into the verification queue once they've submitted something
+    // Put the worker (back) into the verification queue. This must include
+    // 'rejected' — otherwise a worker who was turned down could upload a
+    // corrected document and it would never reach an admin for review.
+    // 'verified' workers are left alone so an extra upload can't un-verify them.
     await db.query(
-      `UPDATE worker_profiles SET verification_status = 'pending'
-       WHERE id = $1 AND verification_status = 'unverified'`,
+      `UPDATE worker_profiles SET verification_status = 'pending', updated_at = now()
+       WHERE id = $1 AND verification_status IN ('unverified', 'rejected')`,
       [wp[0].id]
     );
 
