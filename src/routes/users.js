@@ -3,6 +3,7 @@ const bcrypt = require("bcryptjs");
 const db = require("../db");
 const { requireAuth } = require("../middleware/auth");
 const { deleteAccount } = require("../accountDeletion");
+const { uploadImage } = require("../storage");
 
 const router = express.Router();
 
@@ -35,20 +36,36 @@ router.get("/me", requireAuth, async (req, res) => {
 });
 
 router.patch("/me", requireAuth, async (req, res) => {
-  const { full_name, email, preferred_language, profile_photo_url, notifications_enabled } = req.body;
-  const { rows } = await db.query(
-    `UPDATE users SET
-       full_name = COALESCE($1, full_name),
-       email = COALESCE($2, email),
-       preferred_language = COALESCE($3, preferred_language),
-       profile_photo_url = COALESCE($4, profile_photo_url),
-       notifications_enabled = COALESCE($5, notifications_enabled),
-       updated_at = now()
-     WHERE id = $6
-     RETURNING id, phone, email, full_name, role, preferred_language, profile_photo_url, notifications_enabled`,
-    [full_name, email, preferred_language, profile_photo_url, notifications_enabled, req.user.id]
-  );
-  res.json(rows[0]);
+  try {
+    const { full_name, email, preferred_language, profile_photo_url, notifications_enabled } = req.body;
+
+    // The app sends a base64 data URI. Upload it and store only the resulting
+    // URL — keeping base64 blobs in Postgres bloats the DB and slows every
+    // query that touches this table. An already-hosted URL passes through.
+    let photoUrl = profile_photo_url;
+    if (photoUrl && photoUrl.startsWith("data:")) {
+      const { url } = await uploadImage(photoUrl, { folder: "ysr/avatars" });
+      photoUrl = url;
+    }
+
+    const { rows } = await db.query(
+      `UPDATE users SET
+         full_name = COALESCE($1, full_name),
+         email = COALESCE($2, email),
+         preferred_language = COALESCE($3, preferred_language),
+         profile_photo_url = COALESCE($4, profile_photo_url),
+         notifications_enabled = COALESCE($5, notifications_enabled),
+         updated_at = now()
+       WHERE id = $6
+       RETURNING id, phone, email, full_name, role, preferred_language, profile_photo_url, notifications_enabled`,
+      [full_name, email, preferred_language, photoUrl, notifications_enabled, req.user.id]
+    );
+    res.json(rows[0]);
+  } catch (e) {
+    if (e.code === "STORAGE_NOT_CONFIGURED") return res.status(503).json({ error: e.message, code: e.code });
+    console.error("PATCH /users/me crashed:", e);
+    res.status(500).json({ error: "Could not update your profile. Please try again." });
+  }
 });
 
 // --- Saved addresses ---

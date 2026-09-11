@@ -20,6 +20,28 @@ const corsOrigin = process.env.CORS_ORIGIN || "*";
 app.use(cors({ origin: corsOrigin === "*" ? true : corsOrigin.split(",") }));
 app.use(express.json({ limit: "8mb" })); // raised from default 100kb to fit base64 document uploads
 
+// Rate limiting: protects against abuse, credential-stuffing on login, and
+// runaway request loops in the app itself. Deliberately generous — this is a
+// safety net, not something a normal user should ever hit.
+const rateLimit = require("express-rate-limit");
+
+app.use("/api", rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,                     // 120 requests/minute per IP across the API
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests. Please slow down and try again shortly." },
+}));
+
+// Auth endpoints get a tighter limit — these are the ones worth brute-forcing.
+app.use(["/api/auth/login", "/api/auth/register"], rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,                      // 20 attempts per 15 minutes per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many attempts. Please wait a few minutes and try again." },
+}));
+
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.use("/", publicPagesRoutes);

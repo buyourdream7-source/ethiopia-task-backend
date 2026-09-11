@@ -3,6 +3,7 @@ const db = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { getBanks, createSubaccount } = require("../utils/chapa");
 const { getCommissionRate } = require("../utils/commission");
+const { uploadImage } = require("../storage");
 
 const router = express.Router();
 
@@ -212,31 +213,45 @@ router.put("/me/categories", requireAuth, requireRole("worker"), async (req, res
   }
 });
 
-// Document upload: in production this URL comes from your object storage (S3/GCS) after
-// a signed upload from the client. This endpoint just records the private reference.
+// Document upload. Files go to Cloudinary as "authenticated" (private) uploads
+// — license and ID documents shouldn't be fetchable by anyone who guesses the
+// URL, unlike profile photos. Only the resulting reference is stored here.
 router.post("/me/documents", requireAuth, requireRole("worker"), async (req, res) => {
-  const { doc_type, file_url } = req.body;
-  if (!doc_type || !file_url) {
-    return res.status(400).json({ error: "doc_type and file_url are required" });
+  try {
+    const { doc_type, file_url } = req.body;
+    if (!doc_type || !file_url) {
+      return res.status(400).json({ error: "doc_type and file_url are required" });
+    }
+
+    const { rows: wp } = await db.query("SELECT id FROM worker_profiles WHERE user_id = $1", [req.user.id]);
+    if (!wp.length) return res.status(404).json({ error: "Worker profile not found" });
+
+    // The app sends a base64 data URI; upload it and keep only the URL.
+    let storedUrl = file_url;
+    if (storedUrl.startsWith("data:")) {
+      const { url } = await uploadImage(storedUrl, { folder: "ysr/documents", isPrivate: true });
+      storedUrl = url;
+    }
+
+    const { rows } = await db.query(
+      `INSERT INTO verification_documents (worker_id, doc_type, file_url)
+       VALUES ($1,$2,$3) RETURNING id, doc_type, status, uploaded_at`,
+      [wp[0].id, doc_type, storedUrl]
+    );
+
+    // Move the worker into the verification queue once they've submitted something
+    await db.query(
+      `UPDATE worker_profiles SET verification_status = 'pending'
+       WHERE id = $1 AND verification_status = 'unverified'`,
+      [wp[0].id]
+    );
+
+    res.status(201).json(rows[0]);
+  } catch (e) {
+    if (e.code === "STORAGE_NOT_CONFIGURED") return res.status(503).json({ error: e.message, code: e.code });
+    console.error("POST /workers/me/documents crashed:", e);
+    res.status(500).json({ error: "Could not upload your document. Please try again." });
   }
-
-  const { rows: wp } = await db.query("SELECT id FROM worker_profiles WHERE user_id = $1", [req.user.id]);
-  if (!wp.length) return res.status(404).json({ error: "Worker profile not found" });
-
-  const { rows } = await db.query(
-    `INSERT INTO verification_documents (worker_id, doc_type, file_url)
-     VALUES ($1,$2,$3) RETURNING id, doc_type, status, uploaded_at`,
-    [wp[0].id, doc_type, file_url]
-  );
-
-  // Move the worker into the verification queue once they've submitted something
-  await db.query(
-    `UPDATE worker_profiles SET verification_status = 'pending'
-     WHERE id = $1 AND verification_status = 'unverified'`,
-    [wp[0].id]
-  );
-
-  res.status(201).json(rows[0]);
 });
 
 // GET /api/workers/me/banks — list of banks Chapa supports, for the picker in Settings
