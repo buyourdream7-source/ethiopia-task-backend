@@ -101,6 +101,49 @@ router.get("/", async (req, res) => {
   }
 });
 
+// GET /api/workers/me/earnings — per-job earnings breakdown for the worker.
+// "Earnings to date" alone doesn't tell a worker what they were actually paid
+// for which job, or whether it reached their bank — this fills that gap.
+router.get("/me/earnings", requireAuth, requireRole("worker"), async (req, res) => {
+  try {
+    const { rows: wp } = await db.query(
+      "SELECT id, chapa_subaccount_id FROM worker_profiles WHERE user_id = $1",
+      [req.user.id]
+    );
+    if (!wp.length) return res.status(404).json({ error: "Worker profile not found" });
+    const hasBankLinked = !!wp[0].chapa_subaccount_id;
+
+    const { rows: jobs } = await db.query(
+      `SELECT b.id, b.price_final, b.commission_rate, b.commission_amount, b.worker_earnings,
+              b.updated_at AS confirmed_at, b.pricing_type,
+              c.name_en AS category_name, cu.full_name AS customer_name
+       FROM bookings b
+       JOIN categories c ON c.id = b.category_id
+       JOIN users cu ON cu.id = b.customer_id
+       WHERE b.worker_id = $1 AND b.status = 'confirmed'
+       ORDER BY b.updated_at DESC
+       LIMIT 100`,
+      [wp[0].id]
+    );
+
+    const totalEarned = jobs.reduce((sum, j) => sum + Number(j.worker_earnings || 0), 0);
+    const totalCommission = jobs.reduce((sum, j) => sum + Number(j.commission_amount || 0), 0);
+
+    res.json({
+      total_earned: totalEarned,
+      total_commission: totalCommission,
+      jobs_completed: jobs.length,
+      // Whether earnings are routed to their bank automatically, or whether
+      // the platform pays them out manually.
+      payout_method: hasBankLinked ? "automatic" : "manual",
+      jobs,
+    });
+  } catch (e) {
+    console.error("GET /workers/me/earnings crashed:", e);
+    res.status(500).json({ error: "Could not load your earnings. Please try again." });
+  }
+});
+
 router.get("/me", requireAuth, requireRole("worker"), async (req, res) => {
   const { rows } = await db.query(
     `SELECT wp.* FROM worker_profiles wp WHERE wp.user_id = $1`,
