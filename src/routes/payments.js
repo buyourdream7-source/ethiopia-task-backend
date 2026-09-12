@@ -9,6 +9,13 @@ const router = express.Router();
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
+// Where Chapa sends the customer after checkout. On mobile this must be a deep
+// link back into the app — using the website URL leaves them stranded in a
+// browser instead of returning to where they started.
+// Set APP_DEEP_LINK on Railway to enable it; falls back to the web URL.
+const APP_DEEP_LINK = process.env.APP_DEEP_LINK || null;
+const returnBase = APP_DEEP_LINK || FRONTEND_URL;
+
 // Applies the real, database-level side effects of a confirmed payment.
 // Called from both the webhook and the polling endpoint — either one might
 // be the first to see a "paid" result, so this must be safe to run twice.
@@ -160,7 +167,7 @@ router.post("/bookings/:id/initiate", requireAuth, requireRole("customer"), asyn
         firstName,
         lastName: rest.join(" ") || "-",
         txRef,
-        returnUrl: `${FRONTEND_URL}?payment_booking=${booking.id}&tx_ref=${txRef}`,
+        returnUrl: `${returnBase}?payment_booking=${booking.id}&tx_ref=${txRef}`,
         subaccountId,
       });
       res.json({ checkout_url: checkoutUrl, tx_ref: txRef, amount });
@@ -366,7 +373,7 @@ router.post("/subscription/initiate", requireAuth, requireRole("customer"), asyn
         firstName,
         lastName: rest.join(" ") || "-",
         txRef,
-        returnUrl: `${FRONTEND_URL}?subscription_tx=${txRef}`,
+        returnUrl: `${returnBase}?subscription_tx=${txRef}`,
       });
       res.json({ checkout_url: checkoutUrl, tx_ref: txRef, amount });
     } catch (e) {
