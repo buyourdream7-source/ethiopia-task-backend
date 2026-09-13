@@ -122,13 +122,18 @@ router.patch("/users/:id/suspend", async (req, res) => {
 // --- Customer subscriptions (manual for now — no online payment collection wired up yet) ---
 
 router.get("/customers", async (req, res) => {
-  const { rows } = await db.query(`
-    SELECT u.id, u.full_name, u.phone, u.subscription_active, u.is_suspended, u.payment_deadline,
-      (SELECT COUNT(*) FROM bookings b WHERE b.customer_id = u.id AND b.status = 'confirmed') AS free_jobs_used
-    FROM users u WHERE u.role = 'customer'
-    ORDER BY u.is_suspended DESC, u.created_at DESC
-  `);
-  res.json(rows);
+  try {
+    const { rows } = await db.query(`
+      SELECT u.id, u.full_name, u.phone, u.subscription_active, u.is_suspended, u.payment_deadline,
+        (SELECT COUNT(*) FROM bookings b WHERE b.customer_id = u.id AND b.status = 'confirmed') AS free_jobs_used
+      FROM users u WHERE u.role = 'customer'
+      ORDER BY u.is_suspended DESC, u.created_at DESC
+    `);
+    res.json(rows);
+  } catch (e) {
+    console.error("GET /admin/customers crashed:", e);
+    res.status(500).json({ error: "Could not load customers." });
+  }
 });
 
 router.patch("/customers/:id/subscription", async (req, res) => {
