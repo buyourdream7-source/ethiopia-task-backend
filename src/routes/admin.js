@@ -2,7 +2,6 @@ const express = require("express");
 const db = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { signedUrlFor } = require("../storage");
-const { notify } = require("../utils/notify");
 
 const router = express.Router();
 router.use(requireAuth, requireRole("admin"));
@@ -194,75 +193,6 @@ router.post("/categories", async (req, res) => {
     [slug, name_en, name_am || null, icon_key || null, sort_order || 0]
   );
   res.status(201).json(rows[0]);
-});
-
-// ─────────────────────────────────────────────────────────────────────────
-// Worker payouts
-//
-// Automatic splitting via Chapa subaccounts isn't available yet, so payouts
-// happen outside the app. These endpoints track who is owed what, and record
-// payments as they're made, so nothing depends on anyone's memory.
-// ─────────────────────────────────────────────────────────────────────────
-
-// GET /api/admin/payouts — every worker with their earned / paid / owed figures
-router.get("/payouts", async (req, res) => {
-  try {
-    const { rows } = await db.query(`
-      SELECT wp.id AS worker_id, u.full_name, u.phone,
-             wp.bank_name, wp.account_number, wp.account_name,
-             COALESCE(earned.total, 0) AS total_earned,
-             COALESCE(paid.total, 0)   AS total_paid_out,
-             GREATEST(COALESCE(earned.total, 0) - COALESCE(paid.total, 0), 0) AS balance_owed
-      FROM worker_profiles wp
-      JOIN users u ON u.id = wp.user_id
-      LEFT JOIN (
-        SELECT worker_id, SUM(worker_earnings) AS total
-        FROM bookings WHERE status = 'confirmed' GROUP BY worker_id
-      ) earned ON earned.worker_id = wp.id
-      LEFT JOIN (
-        SELECT worker_id, SUM(amount) AS total
-        FROM worker_payouts GROUP BY worker_id
-      ) paid ON paid.worker_id = wp.id
-      WHERE u.is_deleted IS NOT TRUE
-      ORDER BY balance_owed DESC, u.full_name
-    `);
-    res.json(rows);
-  } catch (e) {
-    console.error("GET /admin/payouts crashed:", e);
-    res.status(500).json({ error: "Could not load payouts." });
-  }
-});
-
-// POST /api/admin/payouts — record a payment made to a worker
-router.post("/payouts", async (req, res) => {
-  try {
-    const { worker_id, amount, method, reference, note } = req.body;
-    const value = Number(amount);
-    if (!worker_id || !value || value <= 0) {
-      return res.status(400).json({ error: "A worker and a positive amount are required." });
-    }
-
-    const { rows } = await db.query(
-      `INSERT INTO worker_payouts (worker_id, amount, method, reference, note, paid_by)
-       VALUES ($1,$2,$3,$4,$5,$6)
-       RETURNING id, amount, method, reference, paid_at`,
-      [worker_id, value, method || null, reference || null, note || null, req.user.id]
-    );
-
-    // Let the worker know, so they aren't left wondering whether it happened.
-    const { rows: wp } = await db.query(
-      "SELECT user_id FROM worker_profiles WHERE id = $1",
-      [worker_id]
-    );
-    if (wp.length) {
-      await notify(wp[0].user_id, "Payment sent", `A payout of ${value.toFixed(2)} ETB has been recorded for you.`);
-    }
-
-    res.status(201).json(rows[0]);
-  } catch (e) {
-    console.error("POST /admin/payouts crashed:", e);
-    res.status(500).json({ error: "Could not record the payout." });
-  }
 });
 
 module.exports = router;

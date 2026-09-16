@@ -129,25 +129,14 @@ router.get("/me/earnings", requireAuth, requireRole("worker"), async (req, res) 
     const totalEarned = jobs.reduce((sum, j) => sum + Number(j.worker_earnings || 0), 0);
     const totalCommission = jobs.reduce((sum, j) => sum + Number(j.commission_amount || 0), 0);
 
-    // What we've actually paid them so far, and the resulting balance.
-    const { rows: payouts } = await db.query(
-      `SELECT id, amount, method, reference, note, paid_at
-       FROM worker_payouts WHERE worker_id = $1 ORDER BY paid_at DESC LIMIT 50`,
-      [wp[0].id]
-    );
-    const totalPaidOut = payouts.reduce((sum, p) => sum + Number(p.amount || 0), 0);
-
     res.json({
       total_earned: totalEarned,
       total_commission: totalCommission,
-      total_paid_out: totalPaidOut,
-      balance_owed: Math.max(totalEarned - totalPaidOut, 0),
       jobs_completed: jobs.length,
       // Whether earnings are routed to their bank automatically, or whether
       // the platform pays them out manually.
       payout_method: hasBankLinked ? "automatic" : "manual",
       jobs,
-      payouts,
     });
   } catch (e) {
     console.error("GET /workers/me/earnings crashed:", e);
@@ -321,32 +310,6 @@ router.get("/me/banks", requireAuth, requireRole("worker"), async (req, res) => 
   } catch (e) {
     if (e.code === "PAYMENT_NOT_CONFIGURED") return res.status(503).json({ error: e.message, code: e.code });
     res.status(502).json({ error: e.message });
-  }
-});
-
-// PATCH /api/workers/me/payout-details — save where to send this worker's
-// money, typed in by hand. Separate from /bank-details, which goes through
-// Chapa's subaccount flow: that needs Chapa's bank list, which isn't always
-// available. This keeps workers able to get paid regardless.
-router.patch("/me/payout-details", requireAuth, requireRole("worker"), async (req, res) => {
-  try {
-    const { bank_name, account_number, account_name } = req.body;
-    if (!bank_name || !account_number || !account_name) {
-      return res.status(400).json({ error: "Bank name, account number, and account holder name are all required." });
-    }
-
-    const { rows } = await db.query(
-      `UPDATE worker_profiles SET bank_name = $1, account_number = $2, account_name = $3, updated_at = now()
-       WHERE user_id = $4
-       RETURNING bank_name, account_number, account_name`,
-      [String(bank_name).trim(), String(account_number).trim(), String(account_name).trim(), req.user.id]
-    );
-    if (!rows.length) return res.status(404).json({ error: "Worker profile not found" });
-
-    res.json(rows[0]);
-  } catch (e) {
-    console.error("PATCH /workers/me/payout-details crashed:", e);
-    res.status(500).json({ error: "Could not save your payout details. Please try again." });
   }
 });
 
