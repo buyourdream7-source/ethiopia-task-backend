@@ -324,6 +324,32 @@ router.get("/me/banks", requireAuth, requireRole("worker"), async (req, res) => 
   }
 });
 
+// PATCH /api/workers/me/payout-details — save where to send this worker's
+// money, typed in by hand. Separate from /bank-details, which goes through
+// Chapa's subaccount flow: that needs Chapa's bank list, which isn't always
+// available. This keeps workers able to get paid regardless.
+router.patch("/me/payout-details", requireAuth, requireRole("worker"), async (req, res) => {
+  try {
+    const { bank_name, account_number, account_name } = req.body;
+    if (!bank_name || !account_number || !account_name) {
+      return res.status(400).json({ error: "Bank name, account number, and account holder name are all required." });
+    }
+
+    const { rows } = await db.query(
+      `UPDATE worker_profiles SET bank_name = $1, account_number = $2, account_name = $3, updated_at = now()
+       WHERE user_id = $4
+       RETURNING bank_name, account_number, account_name`,
+      [String(bank_name).trim(), String(account_number).trim(), String(account_name).trim(), req.user.id]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Worker profile not found" });
+
+    res.json(rows[0]);
+  } catch (e) {
+    console.error("PATCH /workers/me/payout-details crashed:", e);
+    res.status(500).json({ error: "Could not save your payout details. Please try again." });
+  }
+});
+
 // PATCH /api/workers/me/bank-details — save bank info and create/refresh the
 // Chapa subaccount used to automatically route this worker's share of a
 // payment straight to their bank (see split payments in payments.js).
