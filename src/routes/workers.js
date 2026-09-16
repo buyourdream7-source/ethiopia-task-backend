@@ -129,14 +129,25 @@ router.get("/me/earnings", requireAuth, requireRole("worker"), async (req, res) 
     const totalEarned = jobs.reduce((sum, j) => sum + Number(j.worker_earnings || 0), 0);
     const totalCommission = jobs.reduce((sum, j) => sum + Number(j.commission_amount || 0), 0);
 
+    // What we've actually paid them so far, and the resulting balance.
+    const { rows: payouts } = await db.query(
+      `SELECT id, amount, method, reference, note, paid_at
+       FROM worker_payouts WHERE worker_id = $1 ORDER BY paid_at DESC LIMIT 50`,
+      [wp[0].id]
+    );
+    const totalPaidOut = payouts.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
     res.json({
       total_earned: totalEarned,
       total_commission: totalCommission,
+      total_paid_out: totalPaidOut,
+      balance_owed: Math.max(totalEarned - totalPaidOut, 0),
       jobs_completed: jobs.length,
       // Whether earnings are routed to their bank automatically, or whether
       // the platform pays them out manually.
       payout_method: hasBankLinked ? "automatic" : "manual",
       jobs,
+      payouts,
     });
   } catch (e) {
     console.error("GET /workers/me/earnings crashed:", e);
