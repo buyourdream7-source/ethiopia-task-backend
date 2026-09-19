@@ -77,6 +77,10 @@ router.get("/", async (req, res) => {
       ${distanceExpr} AS distance_km,
       MIN(wc.price_min) AS min_price, MAX(wc.price_max) AS max_price,
       array_agg(DISTINCT c.slug) AS categories,
+      -- What a worker calls their own service, for the "others" category.
+      -- Shown instead of the generic category name so a customer browsing
+      -- Other services sees "Furniture assembly" rather than "Other services".
+      (array_agg(wc.custom_service_name) FILTER (WHERE wc.custom_service_name IS NOT NULL))[1] AS custom_service_name,
       bool_or(c.requires_license) AS category_requires_license,
       EXISTS (
         SELECT 1 FROM verification_documents vd
@@ -153,7 +157,7 @@ router.get("/me", requireAuth, requireRole("worker"), async (req, res) => {
   const workerId = rows[0].id;
 
   const { rows: categories } = await db.query(
-    `SELECT c.slug, c.name_en, c.requires_license, wc.price_min, wc.price_max
+    `SELECT c.slug, c.name_en, c.requires_license, wc.price_min, wc.price_max, wc.custom_service_name
      FROM worker_categories wc JOIN categories c ON c.id = wc.category_id
      WHERE wc.worker_id = $1`,
     [workerId]
@@ -182,7 +186,7 @@ router.get("/:id", async (req, res) => {
   if (!rows.length) return res.status(404).json({ error: "Worker not found" });
 
   const { rows: categories } = await db.query(
-    `SELECT c.slug, c.name_en, c.name_am, c.requires_license, wc.price_min, wc.price_max
+    `SELECT c.slug, c.name_en, c.name_am, c.requires_license, wc.price_min, wc.price_max, wc.custom_service_name
      FROM worker_categories wc JOIN categories c ON c.id = wc.category_id
      WHERE wc.worker_id = $1`,
     [req.params.id]
@@ -239,10 +243,19 @@ router.put("/me/categories", requireAuth, requireRole("worker"), async (req, res
     for (const c of categories) {
       const { rows: cat } = await client.query("SELECT id FROM categories WHERE slug = $1", [c.category_slug]);
       if (!cat.length) continue;
+
+      // "others" lets a worker offer something not in the category list, so
+      // they name it themselves. Without a name it isn't bookable — a customer
+      // would have no idea what they're booking.
+      const customName = c.category_slug === "others"
+        ? String(c.custom_service_name || "").trim().slice(0, 80)
+        : null;
+      if (c.category_slug === "others" && !customName) continue;
+
       await client.query(
-        `INSERT INTO worker_categories (worker_id, category_id, price_min, price_max)
-         VALUES ($1,$2,$3,$4)`,
-        [workerId, cat[0].id, c.price_min, c.price_max]
+        `INSERT INTO worker_categories (worker_id, category_id, price_min, price_max, custom_service_name)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [workerId, cat[0].id, c.price_min, c.price_max, customName]
       );
     }
     await client.query("COMMIT");
