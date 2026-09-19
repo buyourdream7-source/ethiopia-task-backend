@@ -91,20 +91,22 @@ async function verifyPayment(txRef) {
  */
 async function getBanks() {
   requireConfigured();
-  const res = await fetch(`${CHAPA_BASE}/banks`, {
-    headers: { Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}` },
+  const res = await fetch(${CHAPA_BASE}/banks, {
+    headers: { Authorization: Bearer ${process.env.CHAPA_SECRET_KEY} },
   });
   const data = await res.json();
-  if (data.status !== "success") throw new Error(flattenChapaError(data));
 
-  // Chapa nests the actual list under `data`, but has returned it in a couple
-  // of shapes across versions — normalize to a plain array either way.
-  const list = Array.isArray(data.data) ? data.data
-    : Array.isArray(data.data?.data) ? data.data.data
-    : [];
-  return list;
+  // Note: unlike Chapa's other endpoints, /banks returns no status field —
+  // just { message, data }. Checking for status === "success" here made every
+  // successful call throw, using Chapa's own "Banks retrieved" message as the
+  // error text. Go by whether the list actually arrived instead.
+  const list = Array.isArray(data.data) ? data.data : null;
+  if (!list) throw new Error(flattenChapaError(data));
+
+  // Only banks that can actually receive payouts are useful for a worker's
+  // subaccount — offering one that can't just means a failure later.
+  return list.filter((b) => b.can_process_payouts === 1 && b.is_active === 1);
 }
-
 /**
  * Creates (or the caller may choose to re-create) a Chapa subaccount for a
  * worker's bank details, used later to automatically route their share of a
