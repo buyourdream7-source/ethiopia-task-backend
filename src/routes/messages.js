@@ -23,6 +23,19 @@ router.get("/:bookingId/messages", requireAuth, async (req, res) => {
   res.json(rows);
 });
 
+// Spots phone numbers and other off-platform contact details in a message.
+// Deliberately loose — this drives a gentle reminder, not a block, so a few
+// false positives cost nothing.
+function hasContactDetails(text) {
+  const t = String(text);
+  return (
+    /(\+?251|0)\s*[79][\d\s-]{7,}/.test(t) ||      // Ethiopian mobile numbers
+    /\b\d[\d\s-]{8,}\b/.test(t) ||                  // any long digit run
+    /\b[\w.+-]+@[\w-]+\.[\w.]+\b/.test(t) ||        // email
+    /\b(telegram|whatsapp|viber|imo)\b/i.test(t)    // other messaging apps
+  );
+}
+
 router.post("/:bookingId/messages", requireAuth, async (req, res) => {
   const { content } = req.body;
   if (!content || !content.trim()) {
@@ -36,7 +49,12 @@ router.post("/:bookingId/messages", requireAuth, async (req, res) => {
     "INSERT INTO messages (conversation_id, sender_id, content) VALUES ($1,$2,$3) RETURNING *",
     [convo.id, req.user.id, content.trim()]
   );
-  res.status(201).json(rows[0]);
+
+  // The message still sends — workers and customers genuinely need to share
+  // addresses and sometimes numbers to get a job done. But flag it so the app
+  // can remind them that moving off Y S R loses them the payment protection
+  // and dispute support that comes with booking through the platform.
+  res.status(201).json({ ...rows[0], contact_warning: hasContactDetails(content) });
 });
 
 module.exports = router;

@@ -119,13 +119,13 @@ router.patch("/users/:id/suspend", async (req, res) => {
   res.json(rows[0]);
 });
 
-// --- Customer subscriptions (manual for now — no online payment collection wired up yet) ---
+// --- Customers ---
 
 router.get("/customers", async (req, res) => {
   try {
     const { rows } = await db.query(`
-      SELECT u.id, u.full_name, u.phone, u.subscription_active, u.is_suspended, u.payment_deadline,
-        (SELECT COUNT(*) FROM bookings b WHERE b.customer_id = u.id AND b.status = 'confirmed') AS free_jobs_used
+      SELECT u.id, u.full_name, u.phone, u.is_suspended,
+        (SELECT COUNT(*) FROM bookings b WHERE b.customer_id = u.id AND b.status = 'confirmed') AS jobs_completed
       FROM users u WHERE u.role = 'customer'
       ORDER BY u.is_suspended DESC, u.created_at DESC
     `);
@@ -134,16 +134,6 @@ router.get("/customers", async (req, res) => {
     console.error("GET /admin/customers crashed:", e);
     res.status(500).json({ error: "Could not load customers." });
   }
-});
-
-router.patch("/customers/:id/subscription", async (req, res) => {
-  const { active } = req.body;
-  const { rows } = await db.query(
-    "UPDATE users SET subscription_active = $1, updated_at = now() WHERE id = $2 AND role = 'customer' RETURNING id, full_name, subscription_active",
-    [!!active, req.params.id]
-  );
-  if (!rows.length) return res.status(404).json({ error: "Customer not found" });
-  res.json(rows[0]);
 });
 
 // --- Commission settings ---
@@ -165,21 +155,49 @@ router.patch("/settings/commission", async (req, res) => {
   res.json({ commission_rate: rate });
 });
 
-router.get("/settings/subscription-price", async (req, res) => {
-  const { rows } = await db.query("SELECT value FROM platform_settings WHERE key = 'subscription_price_etb'");
-  res.json({ subscription_price_etb: parseFloat(rows[0]?.value || "811.75") });
+// --- Inspection fees ---
+//
+// Charged upfront on variable-priced jobs (electrician, plumber and so on)
+// to cover the worker's visit before a quote can be given. Set per category
+// rather than globally, since a plumbing call-out and a construction survey
+// aren't worth the same.
+
+router.get("/settings/inspection-fees", async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, slug, name_en, inspection_fee
+       FROM categories
+       WHERE pricing_type = 'variable' AND parent_slug IS NULL
+       ORDER BY sort_order, name_en`
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error("GET /admin/settings/inspection-fees crashed:", e);
+    res.status(500).json({ error: "Could not load inspection fees." });
+  }
 });
 
-router.patch("/settings/subscription-price", async (req, res) => {
-  const { price } = req.body;
-  if (price === undefined || price < 0) {
-    return res.status(400).json({ error: "price must be a positive number" });
+router.patch("/settings/inspection-fees/:slug", async (req, res) => {
+  try {
+    const { fee } = req.body;
+    const value = Number(fee);
+    if (!Number.isFinite(value) || value < 0 || value > 10000) {
+      return res.status(400).json({ error: "Fee must be between 0 and 10,000 ETB." });
+    }
+
+    const { rows } = await db.query(
+      `UPDATE categories SET inspection_fee = $1, updated_at = now()
+       WHERE slug = $2 AND pricing_type = 'variable'
+       RETURNING id, slug, name_en, inspection_fee`,
+      [value, req.params.slug]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Category not found" });
+
+    res.json(rows[0]);
+  } catch (e) {
+    console.error("PATCH /admin/settings/inspection-fees crashed:", e);
+    res.status(500).json({ error: "Could not update the inspection fee." });
   }
-  await db.query(
-    `UPDATE platform_settings SET value = $1, updated_at = now(), updated_by = $2 WHERE key = 'subscription_price_etb'`,
-    [String(price), req.user.id]
-  );
-  res.json({ subscription_price_etb: price });
 });
 
 // --- Categories ---

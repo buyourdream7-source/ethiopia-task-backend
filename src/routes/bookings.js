@@ -40,38 +40,21 @@ async function loadBookingForUser(bookingId, user) {
 // for fixed-price categories) actually clears via Chapa. The frontend must
 // follow this up with POST /api/payments/bookings/:id/initiate.
 router.post("/", requireAuth, requireRole("customer"), async (req, res) => {
-  const { worker_id, category_slug, scheduled_at, address_text, latitude, longitude, price_quoted } = req.body;
+  const { worker_id, category_slug, scheduled_at, address_text, latitude, longitude, price_quoted, custom_service_name } = req.body;
 
   if (!worker_id || !category_slug || !address_text || !price_quoted) {
     return res.status(400).json({ error: "worker_id, category_slug, address_text and price_quoted are required" });
   }
 
-  try {
-    // Expire a paid subscription whose period has ended. Admin-activated
-    // subscriptions have no expiry date and are left alone.
-    await db.query(
-      `UPDATE users SET subscription_active = false, updated_at = now()
-       WHERE id = $1 AND subscription_active = true
-         AND subscription_expires_at IS NOT NULL AND subscription_expires_at < now()`,
-      [req.user.id]
-    );
+  // For the "others" category the worker names their own service, so the
+  // booking needs to record what was actually being booked.
+  if (category_slug === "others" && !String(custom_service_name || "").trim()) {
+    return res.status(400).json({ error: "Please say what service you need." });
+  }
 
-    const { rows: userRows } = await db.query("SELECT subscription_active FROM users WHERE id = $1", [req.user.id]);
-    if (!userRows[0].subscription_active) {
-      const { rows: countRows } = await db.query(
-        "SELECT COUNT(*) AS n FROM bookings WHERE customer_id = $1 AND status = 'confirmed'",
-        [req.user.id]
-      );
-      const freeJobsUsed = Number(countRows[0].n);
-      const FREE_JOB_LIMIT = 3;
-      if (freeJobsUsed >= FREE_JOB_LIMIT) {
-        return res.status(402).json({
-          error: "You've used your 3 free jobs. Subscribe to keep booking.",
-          code: "TRIAL_EXPIRED",
-          free_jobs_used: freeJobsUsed,
-        });
-      }
-    }
+  try {
+    // Subscriptions removed — the platform earns from commission and the
+    // inspection fee instead. Customers can book freely.
 
     const { rows: cat } = await db.query(
       "SELECT id, pricing_type, inspection_fee FROM categories WHERE slug = $1",
@@ -92,11 +75,12 @@ router.post("/", requireAuth, requireRole("customer"), async (req, res) => {
     const { rows: booking } = await db.query(
       `INSERT INTO bookings
          (customer_id, worker_id, category_id, scheduled_at, address_text, latitude, longitude,
-          price_quoted, status, pricing_type, inspection_fee_amount)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending_payment',$9,$10)
+          price_quoted, status, pricing_type, inspection_fee_amount, custom_service_name)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending_payment',$9,$10,$11)
        RETURNING *`,
       [req.user.id, worker_id, category.id, scheduled_at || null, address_text, latitude || null, longitude || null,
-       price_quoted, category.pricing_type, inspectionFeeAmount]
+       price_quoted, category.pricing_type, inspectionFeeAmount,
+       category_slug === "others" ? String(custom_service_name).trim() : null]
     );
 
     await db.query(
