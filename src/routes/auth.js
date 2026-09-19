@@ -3,6 +3,7 @@ const bcrypt = require("bcryptjs");
 const db = require("../db");
 const { signToken } = require("../utils/jwt");
 const { requireAuth } = require("../middleware/auth");
+const { sendSms } = require("../utils/afromessage");
 
 const router = express.Router();
 
@@ -87,16 +88,88 @@ router.post("/login", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// Phone verification (OTP) — DISABLED
+// Phone verification (OTP)
 //
-// Removed for now: no SMS provider credit yet, and OTP isn't needed at this
-// stage. New users are treated as verified (see migration_015).
-//
-// To re-enable later:
-//   1. Restore these routes from git history
-//   2. Set AFROMESSAGE_TOKEN + AFROMESSAGE_SENDER_NAME on Railway
-//   3. Restore PhoneVerificationGate in App.jsx
-//   4. ALTER TABLE users ALTER COLUMN is_phone_verified SET DEFAULT false;
+// Sends the code via AfroMessage. If AFROMESSAGE_TOKEN isn't set, or the send
+// fails for any reason (bad credentials, no credit, network issue), the code
+// is returned as `dev_otp` instead so registration is never fully blocked by
+// an SMS problem — the app shows it on screen and says why.
 // ─────────────────────────────────────────────────────────────────────────
+
+// POST /api/auth/send-otp — generate a code and text it to the user
+router.post("/send-otp", requireAuth, async (req, res) => {
+  try {
+    const code = String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);          // 10 minutes
+
+    const { rows } = await db.query("SELECT phone, is_phone_verified FROM users WHERE id = $1", [req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: "User not found" });
+    if (rows[0].is_phone_verified) return res.json({ already_verified: true });
+
+    const phone = rows[0].phone;
+
+    // Replace any earlier unused code for this user so only the newest works.
+    await db.query("DELETE FROM otp_codes WHERE user_id = $1", [req.user.id]);
+    await db.query(
+      "INSERT INTO otp_codes (user_id, code, expires_at) VALUES ($1,$2,$3)",
+      [req.user.id, code, expiresAt]
+    );
+
+    try {
+      await sendSms(phone, `Your Y S R verification code is ${code}. It expires in 10 minutes.`);
+      return res.json({ sent: true, via: "sms" });
+    } catch (smsErr) {
+      // SMS failed — don't strand the user. Return the code with the reason so
+      // the app can show it on screen and make clear this isn't normal.
+      console.error("OTP SMS send failed:", smsErr.message);
+      return res.json({ sent: true, via: "fallback", dev_otp: code, reason: smsErr.message });
+    }
+  } catch (err) {
+    console.error("POST /auth/send-otp crashed:", err);
+    res.status(500).json({ error: "Could not send your verification code. Please try again." });
+  }
+});
+
+// POST /api/auth/verify-otp — check the code and mark the phone verified
+router.post("/verify-otp", requireAuth, async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ error: "Enter the code we sent you." });
+
+    const { rows } = await db.query(
+      "SELECT id, code, expires_at, attempts FROM otp_codes WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+      [req.user.id]
+    );
+    if (!rows.length) {
+      return res.status(400).json({ error: "No code found — tap resend to get a new one." });
+    }
+
+    const otp = rows[0];
+
+    if (new Date(otp.expires_at) < new Date()) {
+      await db.query("DELETE FROM otp_codes WHERE id = $1", [otp.id]);
+      return res.status(400).json({ error: "That code expired — tap resend to get a new one." });
+    }
+
+    // Cap guesses so a 6-digit code can't be brute-forced.
+    if (otp.attempts >= 5) {
+      await db.query("DELETE FROM otp_codes WHERE id = $1", [otp.id]);
+      return res.status(429).json({ error: "Too many incorrect attempts — tap resend to get a new code." });
+    }
+
+    if (String(code).trim() !== otp.code) {
+      await db.query("UPDATE otp_codes SET attempts = attempts + 1 WHERE id = $1", [otp.id]);
+      return res.status(400).json({ error: "That code isn't right. Please check and try again." });
+    }
+
+    await db.query("UPDATE users SET is_phone_verified = true, updated_at = now() WHERE id = $1", [req.user.id]);
+    await db.query("DELETE FROM otp_codes WHERE user_id = $1", [req.user.id]);
+
+    res.json({ verified: true });
+  } catch (err) {
+    console.error("POST /auth/verify-otp crashed:", err);
+    res.status(500).json({ error: "Could not verify your code. Please try again." });
+  }
+});
 
 module.exports = router;
