@@ -15,6 +15,7 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 // Set APP_DEEP_LINK on Railway to enable it; falls back to the web URL.
 const APP_DEEP_LINK = process.env.APP_DEEP_LINK || null;
 const returnBase = APP_DEEP_LINK || FRONTEND_URL;
+
 // Applies the real, database-level side effects of a confirmed payment.
 // Called from both the webhook and the polling endpoint — either one might
 // be the first to see a "paid" result, so this must be safe to run twice.
