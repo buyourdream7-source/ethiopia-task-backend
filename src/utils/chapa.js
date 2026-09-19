@@ -91,8 +91,8 @@ async function verifyPayment(txRef) {
  */
 async function getBanks() {
   requireConfigured();
-  const res = await fetch(${CHAPA_BASE}/banks, {
-    headers: { Authorization: Bearer ${process.env.CHAPA_SECRET_KEY} },
+ const res = await fetch('${CHAPA_BASE}/banks', {
+    headers: { Authorization: 'Bearer ${process.env.CHAPA_SECRET_KEY}' },
   });
   const data = await res.json();
 
@@ -102,6 +102,7 @@ async function getBanks() {
   // error text. Go by whether the list actually arrived instead.
   const list = Array.isArray(data.data) ? data.data : null;
   if (!list) throw new Error(flattenChapaError(data));
+
 
   // Only banks that can actually receive payouts are useful for a worker's
   // subaccount — offering one that can't just means a failure later.
