@@ -91,8 +91,8 @@ async function verifyPayment(txRef) {
  */
 async function getBanks() {
   requireConfigured();
- const res = await fetch('${CHAPA_BASE}/banks', {
-    headers: { Authorization: 'Bearer ${process.env.CHAPA_SECRET_KEY}' },
+ const res = await fetch(`${CHAPA_BASE}/banks`, {
+    headers: { Authorization: `Bearer ${process.env.CHAPA_SECRET_KEY}` },
   });
   const data = await res.json();
 
