@@ -47,7 +47,11 @@ async function sendSms(to, message) {
   try { data = JSON.parse(raw); } catch { /* not JSON */ }
 
   if (!res.ok) {
-    throw new Error(data?.message || data?.error || `SMS send failed (${res.status})`);
+    // Include the raw body when the response has no recognisable message
+    // field — otherwise a 400 tells us nothing about what was actually wrong.
+    const detail = data?.message || data?.error || data?.msg
+      || (raw ? raw.slice(0, 300) : "");
+    throw new Error(`SMS send failed (${res.status})${detail ? `: ${detail}` : ""}`);
   }
 
   return data ?? { ok: true };

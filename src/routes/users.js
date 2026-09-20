@@ -4,25 +4,33 @@ const db = require("../db");
 const { requireAuth } = require("../middleware/auth");
 const { deleteAccount } = require("../accountDeletion");
 const { uploadImage } = require("../storage");
+const { normalise, validate, changeStatus, CHANGE_INTERVAL_DAYS } = require("../utils/username");
 
 const router = express.Router();
 
 router.get("/me", requireAuth, async (req, res) => {
   const { rows } = await db.query(
-    `SELECT id, phone, email, full_name, role, preferred_language,
-            profile_photo_url, is_phone_verified, notifications_enabled, created_at
+    `SELECT id, phone, email, full_name, username, username_changed_at, role,
+            preferred_language, profile_photo_url, is_phone_verified,
+            notifications_enabled, created_at
      FROM users WHERE id = $1`,
     [req.user.id]
   );
   if (!rows.length) return res.status(404).json({ error: "User not found" });
   const user = rows[0];
 
+  // Tell the app whether they can rename yet, so it can explain rather than
+  // just rejecting the attempt.
+  const status = changeStatus(user.username_changed_at);
+  user.can_change_username = status.allowed;
+  user.username_next_change_at = status.nextChangeAt;
+
   res.json(user);
 });
 
 router.patch("/me", requireAuth, async (req, res) => {
   try {
-    const { full_name, email, preferred_language, profile_photo_url, notifications_enabled } = req.body;
+    const { full_name, email, preferred_language, profile_photo_url, notifications_enabled, username } = req.body;
 
     // The app sends a base64 data URI. Upload it and store only the resulting
     // URL — keeping base64 blobs in Postgres bloats the DB and slows every
@@ -33,6 +41,43 @@ router.patch("/me", requireAuth, async (req, res) => {
       photoUrl = url;
     }
 
+    // Username changes are rate-limited: a worker's customers know them by
+    // it, so it shouldn't be a moving target. Only touched when the app
+    // actually sends a different one.
+    let newUsername = null;
+    if (username !== undefined && username !== null) {
+      const cleaned = normalise(username);
+      const problem = validate(cleaned);
+      if (problem) return res.status(400).json({ error: problem });
+
+      const { rows: current } = await db.query(
+        "SELECT username, username_changed_at FROM users WHERE id = $1",
+        [req.user.id]
+      );
+      if (!current.length) return res.status(404).json({ error: "User not found" });
+
+      if (cleaned !== current[0].username) {
+        const status = changeStatus(current[0].username_changed_at);
+        if (!status.allowed) {
+          return res.status(429).json({
+            error: `You can change your username once every ${CHANGE_INTERVAL_DAYS} days. You can change it again after ${status.nextChangeAt.toLocaleDateString()}.`,
+            code: "USERNAME_CHANGE_TOO_SOON",
+            next_change_at: status.nextChangeAt,
+          });
+        }
+
+        const { rows: taken } = await db.query(
+          "SELECT 1 FROM users WHERE lower(username) = $1 AND id <> $2",
+          [cleaned, req.user.id]
+        );
+        if (taken.length) {
+          return res.status(409).json({ error: "That username is taken.", code: "USERNAME_TAKEN" });
+        }
+
+        newUsername = cleaned;
+      }
+    }
+
     const { rows } = await db.query(
       `UPDATE users SET
          full_name = COALESCE($1, full_name),
@@ -40,12 +85,21 @@ router.patch("/me", requireAuth, async (req, res) => {
          preferred_language = COALESCE($3, preferred_language),
          profile_photo_url = COALESCE($4, profile_photo_url),
          notifications_enabled = COALESCE($5, notifications_enabled),
+         username = COALESCE($6, username),
+         username_changed_at = CASE WHEN $6::text IS NULL THEN username_changed_at ELSE now() END,
          updated_at = now()
-       WHERE id = $6
-       RETURNING id, phone, email, full_name, role, preferred_language, profile_photo_url, notifications_enabled`,
-      [full_name, email, preferred_language, photoUrl, notifications_enabled, req.user.id]
+       WHERE id = $7
+       RETURNING id, phone, email, full_name, username, username_changed_at, role,
+                 preferred_language, profile_photo_url, notifications_enabled`,
+      [full_name, email, preferred_language, photoUrl, notifications_enabled, newUsername, req.user.id]
     );
-    res.json(rows[0]);
+
+    const updated = rows[0];
+    const status = changeStatus(updated.username_changed_at);
+    updated.can_change_username = status.allowed;
+    updated.username_next_change_at = status.nextChangeAt;
+
+    res.json(updated);
   } catch (e) {
     if (e.code === "STORAGE_NOT_CONFIGURED") return res.status(503).json({ error: e.message, code: e.code });
     console.error("PATCH /users/me crashed:", e);

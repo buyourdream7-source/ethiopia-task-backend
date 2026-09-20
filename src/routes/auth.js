@@ -4,6 +4,7 @@ const db = require("../db");
 const { signToken } = require("../utils/jwt");
 const { requireAuth } = require("../middleware/auth");
 const { sendSms } = require("../utils/sms");
+const { generateFrom } = require("../utils/username");
 
 const router = express.Router();
 
@@ -33,11 +34,15 @@ router.post("/register", async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 12);
 
+    // Everyone gets a username so customers have something unambiguous to
+    // search for. Derived from their name; they can change it later.
+    const username = await generateFrom(full_name, phone);
+
     const { rows } = await db.query(
-      `INSERT INTO users (phone, email, password_hash, full_name, role, preferred_language)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, phone, email, full_name, role, preferred_language, created_at`,
-      [phone, email || null, passwordHash, full_name, finalRole, preferred_language || "en"]
+      `INSERT INTO users (phone, email, password_hash, full_name, username, role, preferred_language)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, phone, email, full_name, username, role, preferred_language, created_at`,
+      [phone, email || null, passwordHash, full_name, username, finalRole, preferred_language || "en"]
     );
     const user = rows[0];
 

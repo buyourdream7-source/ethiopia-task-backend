@@ -71,7 +71,7 @@ router.get("/", async (req, res) => {
 
   const sql = `
     SELECT
-      wp.id AS worker_id, u.full_name, u.profile_photo_url,
+      wp.id AS worker_id, u.full_name, u.username, u.profile_photo_url,
       wp.verification_status, wp.average_rating, wp.total_reviews,
       wp.total_jobs_completed, wp.is_available,
       ${distanceExpr} AS distance_km,
@@ -91,7 +91,7 @@ router.get("/", async (req, res) => {
     LEFT JOIN worker_categories wc ON wc.worker_id = wp.id
     LEFT JOIN categories c ON c.id = wc.category_id
     WHERE ${where.join(" AND ")}
-    GROUP BY wp.id, u.full_name, u.profile_photo_url
+    GROUP BY wp.id, u.full_name, u.username, u.profile_photo_url
     ORDER BY ${sortCol}
     LIMIT 50
   `;
@@ -174,7 +174,7 @@ router.get("/me", requireAuth, requireRole("worker"), async (req, res) => {
 
 router.get("/:id", async (req, res) => {
   const { rows } = await db.query(
-    `SELECT wp.*, u.full_name, u.profile_photo_url, u.preferred_language,
+    `SELECT wp.*, u.full_name, u.username, u.profile_photo_url, u.preferred_language,
        EXISTS (
          SELECT 1 FROM verification_documents vd
          WHERE vd.worker_id = wp.id AND vd.doc_type IN ('license', 'certificate') AND vd.status = 'approved'
