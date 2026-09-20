@@ -3,7 +3,7 @@ const bcrypt = require("bcryptjs");
 const db = require("../db");
 const { signToken } = require("../utils/jwt");
 const { requireAuth } = require("../middleware/auth");
-const { sendSms } = require("../utils/afromessage");
+const { sendSms } = require("../utils/sms");
 
 const router = express.Router();
 
