@@ -56,6 +56,7 @@ async function initializePayment({ amount, email, phoneNumber, firstName, lastNa
 }
 
 
+
 /**
  * Verifies a transaction DIRECTLY with Chapa's servers — this is the only
  * source of truth for whether money actually moved. Never trust a webhook
