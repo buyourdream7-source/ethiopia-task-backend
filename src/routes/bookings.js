@@ -53,8 +53,41 @@ router.post("/", requireAuth, requireRole("customer"), async (req, res) => {
   }
 
   try {
-    // Subscriptions removed — the platform earns from commission and the
-    // inspection fee instead. Customers can book freely.
+    // One open booking per customer–worker pair. A second one before the first
+    // is finished almost always means a double tap or a mistake, and it leaves
+    // the worker with two jobs that look identical.
+    //
+    // Unpaid bookings are the exception. A booking sits in pending_payment
+    // until the customer pays, and there's no way to cancel it from there —
+    // so someone who opened Chapa and backed out would be locked out of this
+    // worker for good. Those are cleared once they're stale: no money moved,
+    // and the worker never saw them. Recent ones still block, because the
+    // customer may be mid-payment and the webhook hasn't landed yet.
+    await db.query(
+      `UPDATE bookings SET status = 'cancelled', updated_at = now(),
+         cancellation_reason = 'Payment not completed'
+       WHERE customer_id = $1 AND worker_id = $2 AND status = 'pending_payment'
+         AND created_at < now() - interval '30 minutes'`,
+      [req.user.id, worker_id]
+    );
+
+    const { rows: open } = await db.query(
+      `SELECT id, status FROM bookings
+       WHERE customer_id = $1 AND worker_id = $2
+         AND status NOT IN ('completed', 'confirmed', 'cancelled')
+       LIMIT 1`,
+      [req.user.id, worker_id]
+    );
+    if (open.length) {
+      const unpaid = open[0].status === "pending_payment";
+      return res.status(409).json({
+        error: unpaid
+          ? "You started a booking with this worker a few minutes ago. Finish paying for it in Bookings, or try again in a little while."
+          : "You already have a booking with this worker in progress. You can book them again once that job is completed.",
+        code: "ACTIVE_BOOKING_EXISTS",
+        booking_id: open[0].id,
+      });
+    }
 
     const { rows: cat } = await db.query(
       "SELECT id, pricing_type, inspection_fee FROM categories WHERE slug = $1",
@@ -99,6 +132,14 @@ router.post("/", requireAuth, requireRole("customer"), async (req, res) => {
 
     res.status(201).json(booking[0]);
   } catch (err) {
+    // The unique index on open customer–worker bookings catches the case the
+    // check above can't: two requests from a double tap arriving together.
+    if (err.code === "23505" && String(err.constraint || "").includes("one_open_booking")) {
+      return res.status(409).json({
+        error: "You already have a booking with this worker in progress.",
+        code: "ACTIVE_BOOKING_EXISTS",
+      });
+    }
     console.error(err);
     res.status(500).json({ error: "Could not create booking" });
   }
