@@ -7,6 +7,19 @@ const { notify } = require("../utils/notify");
 
 const router = express.Router();
 
+function isValidEmail(value) {
+  return typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value.trim());
+}
+
+// Chapa's examples use the local format, 09XXXXXXXX / 07XXXXXXXX. Customers
+// are stored as +2519..., 2519..., or 09... depending on how they signed up.
+function toChapaPhone(phone) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (digits.startsWith("251") && digits.length === 12) return `0${digits.slice(3)}`;
+  if (digits.length === 9) return `0${digits}`;
+  return digits || null;
+}
+
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
 // Where Chapa sends the customer after checkout. On mobile this must be a deep
@@ -97,10 +110,6 @@ router.post("/bookings/:id/initiate", requireAuth, requireRole("customer"), asyn
     if (!amount || amount <= 0) {
       return res.status(400).json({ error: "Could not determine a valid amount to charge" });
     }
-    if (!booking.email) {
-      return res.status(400).json({ error: "An email address is required for online payment.", code: "EMAIL_REQUIRED" });
-    }
-
     // If there's already a pending payment attempt for this booking/type, check
     // with Chapa FIRST rather than blindly reusing its reference — Chapa
     // rejects re-initializing a tx_ref that was already used, and if the
@@ -134,7 +143,12 @@ router.post("/bookings/:id/initiate", requireAuth, requireRole("customer"), asyn
       [booking.id, expectedType, amount, txRef]
     );
 
-    const email = booking.email;
+    // Chapa treats email as optional and accepts a phone number instead.
+    // Every customer has a phone; many don't use email. Only send an email
+    // when it's well-formed — a malformed one gets the whole payment
+    // rejected ("validation.email"), whereas a missing one is fine.
+    const email = isValidEmail(booking.email) ? booking.email.trim() : null;
+    const phoneNumber = toChapaPhone(booking.phone);
     const [firstName, ...rest] = (booking.full_name || "Customer").split(" ");
 
     // TEST MODE — only active if PAYMENT_TEST_MODE=true is explicitly set on the
@@ -164,6 +178,7 @@ router.post("/bookings/:id/initiate", requireAuth, requireRole("customer"), asyn
       const { checkoutUrl } = await initializePayment({
         amount,
         email,
+        phoneNumber,
         firstName,
         lastName: rest.join(" ") || "-",
         txRef,

@@ -17,18 +17,24 @@ function requireConfigured() {
  * Starts a Chapa checkout session. Returns { checkout_url } on success.
  * Throws on any failure — never returns a fabricated success.
  */
-async function initializePayment({ amount, email, firstName, lastName, txRef, returnUrl, subaccountId }) {
+async function initializePayment({ amount, email, phoneNumber, firstName, lastName, txRef, returnUrl, subaccountId }) {
   requireConfigured();
 
   const body = {
     amount: String(amount),
     currency: "ETB",
-    email,
     first_name: firstName,
     last_name: lastName,
     tx_ref: txRef,
     return_url: returnUrl,
   };
+
+  // Chapa accepts either an email or a phone number to identify the customer.
+  // Many customers don't use email, so only include it when we actually have
+  // a valid one — sending a malformed email fails the whole request.
+  if (email) body.email = email;
+  if (phoneNumber) body.phone_number = phoneNumber;
+
   // If the worker has a linked bank subaccount, Chapa automatically routes
   // their share straight to their bank at settlement — no manual payout needed.
   if (subaccountId) body.subaccount = { id: subaccountId };
@@ -49,18 +55,6 @@ async function initializePayment({ amount, email, firstName, lastName, txRef, re
   return { checkoutUrl: data.data.checkout_url };
 }
 
-// Chapa sometimes returns validation errors as an object of field arrays
-// (e.g. { email: ["The email field is required."] }) rather than a plain
-// string — this always produces readable text either way.
-function flattenChapaError(data) {
-  const msg = data?.message;
-  if (typeof msg === "string") return msg;
-  if (msg && typeof msg === "object") {
-    const parts = Object.entries(msg).map(([field, errs]) => `${field}: ${[].concat(errs).join(", ")}`);
-    if (parts.length) return parts.join(" | ");
-  }
-  return "Chapa failed to start the payment session";
-}
 
 /**
  * Verifies a transaction DIRECTLY with Chapa's servers — this is the only
