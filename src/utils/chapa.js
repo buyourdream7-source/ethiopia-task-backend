@@ -35,9 +35,14 @@ async function initializePayment({ amount, email, phoneNumber, firstName, lastNa
   if (email) body.email = email;
   if (phoneNumber) body.phone_number = phoneNumber;
 
-  // If the worker has a linked bank subaccount, Chapa automatically routes
-  // their share straight to their bank at settlement — no manual payout needed.
-  if (subaccountId) body.subaccount = { id: subaccountId };
+  // Split payment. Note the field is `subaccounts` and it's an ARRAY — an
+  // earlier version sent `subaccount` as a single object, which Chapa quietly
+  // ignored, so every payment settled entirely to the platform and workers
+  // received nothing.
+  //
+  // The split rule itself (split_type / split_value) was set when the
+  // subaccount was created, so it doesn't need repeating here.
+  if (subaccountId) body.subaccounts = [{ id: subaccountId }];
 
   const res = await fetch(`${CHAPA_BASE}/transaction/initialize`, {
     method: "POST",
@@ -54,6 +59,7 @@ async function initializePayment({ amount, email, phoneNumber, firstName, lastNa
   }
   return { checkoutUrl: data.data.checkout_url };
 }
+
 
 
 
