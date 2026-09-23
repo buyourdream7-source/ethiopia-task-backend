@@ -165,9 +165,9 @@ router.patch("/settings/commission", async (req, res) => {
 router.get("/settings/inspection-fees", async (req, res) => {
   try {
     const { rows } = await db.query(
-      `SELECT id, slug, name_en, inspection_fee
+      `SELECT id, slug, name_en, inspection_fee, pricing_type
        FROM categories
-       WHERE pricing_type = 'variable' AND parent_slug IS NULL
+       WHERE parent_slug IS NULL
        ORDER BY sort_order, name_en`
     );
     res.json(rows);
@@ -179,38 +179,47 @@ router.get("/settings/inspection-fees", async (req, res) => {
 
 router.patch("/settings/inspection-fees/:slug", async (req, res) => {
   try {
-    const { fee } = req.body;
-    const value = Number(fee);
-    if (!Number.isFinite(value) || value < 0 || value > 10000) {
-      return res.status(400).json({ error: "Fee must be between 0 and 10,000 ETB." });
+    const { fee, pricing_type } = req.body;
+
+    const updates = [];
+    const params = [];
+
+    if (fee !== undefined) {
+      const value = Number(fee);
+      if (!Number.isFinite(value) || value < 0 || value > 10000) {
+        return res.status(400).json({ error: "Fee must be between 0 and 10,000 ETB." });
+      }
+      params.push(value);
+      updates.push(`inspection_fee = $${params.length}`);
     }
 
+    if (pricing_type !== undefined) {
+      if (!["fixed", "variable"].includes(pricing_type)) {
+        return res.status(400).json({ error: "Pricing type must be fixed or variable." });
+      }
+      params.push(pricing_type);
+      updates.push(`pricing_type = $${params.length}`);
+    }
+
+    if (!updates.length) return res.status(400).json({ error: "Nothing to update." });
+
+    params.push(req.params.slug);
     const { rows } = await db.query(
-      `UPDATE categories SET inspection_fee = $1, updated_at = now()
-       WHERE slug = $2 AND pricing_type = 'variable'
-       RETURNING id, slug, name_en, inspection_fee`,
-      [value, req.params.slug]
+      `UPDATE categories SET ${updates.join(", ")}, updated_at = now()
+       WHERE slug = $${params.length}
+       RETURNING id, slug, name_en, inspection_fee, pricing_type`,
+      params
     );
     if (!rows.length) return res.status(404).json({ error: "Category not found" });
 
+    // Bookings record their own pricing_type when created, so changing a
+    // category here only affects future bookings — jobs already underway
+    // keep the terms the customer agreed to.
     res.json(rows[0]);
   } catch (e) {
     console.error("PATCH /admin/settings/inspection-fees crashed:", e);
-    res.status(500).json({ error: "Could not update the inspection fee." });
+    res.status(500).json({ error: "Could not update the category." });
   }
-});
-
-// --- Categories ---
-
-router.post("/categories", async (req, res) => {
-  const { slug, name_en, name_am, icon_key, sort_order } = req.body;
-  if (!slug || !name_en) return res.status(400).json({ error: "slug and name_en are required" });
-  const { rows } = await db.query(
-    `INSERT INTO categories (slug, name_en, name_am, icon_key, sort_order)
-     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-    [slug, name_en, name_am || null, icon_key || null, sort_order || 0]
-  );
-  res.status(201).json(rows[0]);
 });
 
 module.exports = router;
