@@ -59,7 +59,15 @@ async function initializePayment({ amount, email, phoneNumber, firstName, lastNa
   }
   return { checkoutUrl: data.data.checkout_url };
 }
-
+function flattenChapaError(data) {
+  const msg = data?.message;
+  if (typeof msg === "string") return msg;
+  if (msg && typeof msg === "object") {
+    const parts = Object.entries(msg).map(([field, errs]) => `${field}: ${[].concat(errs).join(", ")}`);
+    if (parts.length) return parts.join(" | ");
+  }
+  return "Chapa failed to start the payment session";
+}
 
 
 
