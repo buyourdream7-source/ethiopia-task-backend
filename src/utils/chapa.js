@@ -35,14 +35,16 @@ async function initializePayment({ amount, email, phoneNumber, firstName, lastNa
   if (email) body.email = email;
   if (phoneNumber) body.phone_number = phoneNumber;
 
-  // Split payment. Note the field is `subaccounts` and it's an ARRAY — an
-  // earlier version sent `subaccount` as a single object, which Chapa quietly
-  // ignored, so every payment settled entirely to the platform and workers
-  // received nothing.
+  // Split payment. The key is plural (`subaccounts`) but the value is a single
+  // OBJECT, not an array — verified against the live API. Chapa's own SDKs
+  // wrap it in an array, which their API then rejects with
+  // "subaccounts.id: The subaccount ID field is required". Earlier versions of
+  // this file each got one half right: `subaccount` with an object was
+  // silently ignored, `subaccounts` with an array was rejected outright.
   //
   // The split rule itself (split_type / split_value) was set when the
   // subaccount was created, so it doesn't need repeating here.
-  if (subaccountId) body.subaccounts = [{ id: subaccountId }];
+  if (subaccountId) body.subaccounts = { id: subaccountId };
 
   const res = await fetch(`${CHAPA_BASE}/transaction/initialize`, {
     method: "POST",
@@ -59,6 +61,7 @@ async function initializePayment({ amount, email, phoneNumber, firstName, lastNa
   }
   return { checkoutUrl: data.data.checkout_url };
 }
+
 function flattenChapaError(data) {
   const msg = data?.message;
   if (typeof msg === "string") return msg;
