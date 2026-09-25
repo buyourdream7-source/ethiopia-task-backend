@@ -5,7 +5,11 @@ const { requireAuth, requireRole } = require("../middleware/auth");
 const { initializePayment, verifyPayment } = require("../utils/chapa");
 const { notify } = require("../utils/notify");
 
+const { makeSafe } = require("../utils/safeRouter");
+
 const router = express.Router();
+// A thrown error here returns 500 instead of killing the whole process.
+makeSafe(router);
 
 function isValidEmail(value) {
   return typeof value === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value.trim());

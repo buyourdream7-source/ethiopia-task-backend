@@ -6,7 +6,11 @@ const { deleteAccount } = require("../accountDeletion");
 const { uploadImage } = require("../storage");
 const { normalise, validate, changeStatus, CHANGE_INTERVAL_DAYS } = require("../utils/username");
 
+const { makeSafe } = require("../utils/safeRouter");
+
 const router = express.Router();
+// A thrown error here returns 500 instead of killing the whole process.
+makeSafe(router);
 
 router.get("/me", requireAuth, async (req, res) => {
   const { rows } = await db.query(

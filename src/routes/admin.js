@@ -3,7 +3,11 @@ const db = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { signedUrlFor } = require("../storage");
 
+const { makeSafe } = require("../utils/safeRouter");
+
 const router = express.Router();
+// A thrown error here returns 500 instead of killing the whole process.
+makeSafe(router);
 router.use(requireAuth, requireRole("admin"));
 
 // GET /api/admin/stats — the numbers shown on the admin dashboard home

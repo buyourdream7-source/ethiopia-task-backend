@@ -4,7 +4,11 @@ const { requireAuth, requireRole } = require("../middleware/auth");
 const { notify } = require("../utils/notify");
 const { getCommissionRate, splitPayment } = require("../utils/commission");
 
+const { makeSafe } = require("../utils/safeRouter");
+
 const router = express.Router();
+// A thrown error here returns 500 instead of killing the whole process.
+makeSafe(router);
 
 // Which status transitions are legal, and who is allowed to make them.
 // Note: 'started' -> 'completed' is only valid for FIXED-price bookings —

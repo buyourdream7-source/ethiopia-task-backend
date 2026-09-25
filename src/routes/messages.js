@@ -2,7 +2,11 @@ const express = require("express");
 const db = require("../db");
 const { requireAuth } = require("../middleware/auth");
 
+const { makeSafe } = require("../utils/safeRouter");
+
 const router = express.Router();
+// A thrown error here returns 500 instead of killing the whole process.
+makeSafe(router);
 
 async function loadConversation(bookingId, userId) {
   const { rows } = await db.query(

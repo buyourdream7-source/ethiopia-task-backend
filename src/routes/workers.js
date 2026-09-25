@@ -5,7 +5,11 @@ const { getBanks, createSubaccount } = require("../utils/chapa");
 const { getCommissionRate } = require("../utils/commission");
 const { uploadImage } = require("../storage");
 
+const { makeSafe } = require("../utils/safeRouter");
+
 const router = express.Router();
+// A thrown error here returns 500 instead of killing the whole process.
+makeSafe(router);
 
 /**
  * GET /api/workers

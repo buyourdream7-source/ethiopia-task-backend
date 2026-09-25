@@ -6,7 +6,11 @@ const { requireAuth } = require("../middleware/auth");
 const { sendSms } = require("../utils/sms");
 const { generateFrom } = require("../utils/username");
 
+const { makeSafe } = require("../utils/safeRouter");
+
 const router = express.Router();
+// A thrown error here returns 500 instead of killing the whole process.
+makeSafe(router);
 
 // Ethiopian mobile numbers: +2519XXXXXXXX or +2517XXXXXXXX (9 or 7 series), 9 digits after country code
 const PHONE_REGEX = /^\+251[97]\d{8}$/;
