@@ -12,13 +12,21 @@ router.use(requireAuth, requireRole("admin"));
 
 // GET /api/admin/stats — the numbers shown on the admin dashboard home
 router.get("/stats", async (req, res) => {
+  // Deleted accounts keep their row so booking history stays intact, but they
+  // shouldn't be counted as users — otherwise the dashboard keeps reporting
+  // people who have left.
   const queries = {
-    total_users: "SELECT COUNT(*)::int AS n FROM users WHERE role = 'customer'",
-    total_workers: "SELECT COUNT(*)::int AS n FROM worker_profiles",
-    verified_workers: "SELECT COUNT(*)::int AS n FROM worker_profiles WHERE verification_status = 'verified'",
+    total_users: "SELECT COUNT(*)::int AS n FROM users WHERE role = 'customer' AND is_deleted IS NOT TRUE",
+    total_workers: `SELECT COUNT(*)::int AS n FROM worker_profiles wp
+                    JOIN users u ON u.id = wp.user_id WHERE u.is_deleted IS NOT TRUE`,
+    verified_workers: `SELECT COUNT(*)::int AS n FROM worker_profiles wp
+                       JOIN users u ON u.id = wp.user_id
+                       WHERE wp.verification_status = 'verified' AND u.is_deleted IS NOT TRUE`,
     active_bookings: "SELECT COUNT(*)::int AS n FROM bookings WHERE status NOT IN ('confirmed','cancelled','disputed')",
     completed_jobs: "SELECT COUNT(*)::int AS n FROM bookings WHERE status = 'confirmed'",
-    pending_verifications: "SELECT COUNT(*)::int AS n FROM worker_profiles WHERE verification_status = 'pending'",
+    pending_verifications: `SELECT COUNT(*)::int AS n FROM worker_profiles wp
+                            JOIN users u ON u.id = wp.user_id
+                            WHERE wp.verification_status = 'pending' AND u.is_deleted IS NOT TRUE`,
     open_disputes: "SELECT COUNT(*)::int AS n FROM disputes WHERE status IN ('open','investigating')",
     revenue_total: "SELECT COALESCE(SUM(commission_amount),0)::numeric(12,2) AS n FROM bookings WHERE status = 'confirmed'",
   };
