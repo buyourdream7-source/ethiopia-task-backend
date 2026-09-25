@@ -18,8 +18,8 @@ const router = express.Router();
  *   verified_only - "true"
  *   sort       - "distance" | "price" | "rating" (default rating; distance requires lat/lng)
  */
-router.get("/", async (req, res) => {
-  const { category, lat, lng, min_rating, verified_only, sort } = req.query;
+router.get("/", requireAuth, async (req, res) => {
+  const { category, lat, lng, min_rating, verified_only, sort, favourites_only } = req.query;
 
   const hasLocation = lat !== undefined && lng !== undefined;
 
@@ -27,6 +27,13 @@ router.get("/", async (req, res) => {
   // Deleted accounts keep their row so booking history stays intact, but they
   // must never appear to customers — a scrubbed profile shows as "Deleted User".
   const where = ["wp.is_available = true", "u.is_deleted IS NOT TRUE"];
+
+  // Saved workers only. Uses the same query as normal browsing so the cards,
+  // distances and ratings all behave identically.
+  if (favourites_only === "true") {
+    params.push(req.user.id);
+    where.push(`EXISTS (SELECT 1 FROM favourite_workers fw WHERE fw.worker_id = wp.id AND fw.customer_id = $${params.length})`);
+  }
 
   if (verified_only === "true") {
     where.push("wp.verification_status = 'verified'");
@@ -71,6 +78,10 @@ router.get("/", async (req, res) => {
     sort === "distance" && hasLocation ? "distance_km ASC NULLS LAST" :
     "wp.average_rating DESC";
 
+  // Whoever is browsing, so each card can show whether they've saved it.
+  params.push(req.user.id);
+  const viewerIdx = params.length;
+
   const sql = `
     SELECT
       wp.id AS worker_id, u.full_name, u.username, u.profile_photo_url,
@@ -79,6 +90,7 @@ router.get("/", async (req, res) => {
       ${distanceExpr} AS distance_km,
       MIN(wc.price_min) AS min_price, MAX(wc.price_max) AS max_price,
       array_agg(DISTINCT c.slug) AS categories,
+      EXISTS (SELECT 1 FROM favourite_workers fw WHERE fw.worker_id = wp.id AND fw.customer_id = $${viewerIdx}) AS is_favourite,
       -- What a worker calls their own service, for the "others" category.
       -- Shown instead of the generic category name so a customer browsing
       -- Other services sees "Furniture assembly" rather than "Other services".
@@ -110,6 +122,40 @@ router.get("/", async (req, res) => {
 // GET /api/workers/me/earnings — per-job earnings breakdown for the worker.
 // "Earnings to date" alone doesn't tell a worker what they were actually paid
 // for which job, or whether it reached their bank — this fills that gap.
+// ─────────────────────────────────────────────────────────────────────────
+// Saved workers
+//
+// A customer stars a worker they'd use again, then finds them from the star
+// on the home screen without searching.
+// ─────────────────────────────────────────────────────────────────────────
+
+router.put("/:id/favourite", requireAuth, requireRole("customer"), async (req, res) => {
+  try {
+    await db.query(
+      `INSERT INTO favourite_workers (customer_id, worker_id) VALUES ($1, $2)
+       ON CONFLICT DO NOTHING`,
+      [req.user.id, req.params.id]
+    );
+    res.json({ is_favourite: true });
+  } catch (e) {
+    console.error("PUT /workers/:id/favourite crashed:", e);
+    res.status(500).json({ error: "Could not save this worker." });
+  }
+});
+
+router.delete("/:id/favourite", requireAuth, requireRole("customer"), async (req, res) => {
+  try {
+    await db.query(
+      "DELETE FROM favourite_workers WHERE customer_id = $1 AND worker_id = $2",
+      [req.user.id, req.params.id]
+    );
+    res.json({ is_favourite: false });
+  } catch (e) {
+    console.error("DELETE /workers/:id/favourite crashed:", e);
+    res.status(500).json({ error: "Could not remove this worker." });
+  }
+});
+
 router.get("/me/earnings", requireAuth, requireRole("worker"), async (req, res) => {
   try {
     const { rows: wp } = await db.query(
