@@ -38,7 +38,7 @@ router.get("/verifications", async (req, res) => {
      FROM worker_profiles wp
      JOIN users u ON u.id = wp.user_id
      LEFT JOIN verification_documents vd ON vd.worker_id = wp.id
-     WHERE wp.verification_status = 'pending'
+     WHERE wp.verification_status = 'pending' AND u.is_deleted IS NOT TRUE
      GROUP BY wp.id, u.full_name, u.phone
      ORDER BY wp.updated_at ASC`
   );
@@ -126,7 +126,7 @@ router.get("/customers", async (req, res) => {
     const { rows } = await db.query(`
       SELECT u.id, u.full_name, u.phone, u.is_suspended,
         (SELECT COUNT(*) FROM bookings b WHERE b.customer_id = u.id AND b.status = 'confirmed') AS jobs_completed
-      FROM users u WHERE u.role = 'customer'
+      FROM users u WHERE u.role = 'customer' AND u.is_deleted IS NOT TRUE
       ORDER BY u.is_suspended DESC, u.created_at DESC
     `);
     res.json(rows);

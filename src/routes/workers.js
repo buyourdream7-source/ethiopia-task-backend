@@ -24,7 +24,9 @@ router.get("/", async (req, res) => {
   const hasLocation = lat !== undefined && lng !== undefined;
 
   const params = [];
-  const where = ["wp.is_available = true"];
+  // Deleted accounts keep their row so booking history stays intact, but they
+  // must never appear to customers — a scrubbed profile shows as "Deleted User".
+  const where = ["wp.is_available = true", "u.is_deleted IS NOT TRUE"];
 
   if (verified_only === "true") {
     where.push("wp.verification_status = 'verified'");
@@ -346,7 +348,11 @@ router.patch("/me/bank-details", requireAuth, requireRole("worker"), async (req,
       bankCode: bank_code,
       accountNumber: account_number,
       accountName: account_name,
-      splitValue: 1 - rate, // the worker's share; the rest stays with the platform automatically
+      // Chapa's split_value is the PLATFORM's cut, not the worker's: with
+      // split_type 'percentage' and 0.15, Chapa keeps 15% for us and settles
+      // the rest to the worker's bank. Sending the worker's share here would
+      // invert the split and pay them our commission instead.
+      splitValue: rate,
     });
 
     const { rows: updated } = await db.query(
