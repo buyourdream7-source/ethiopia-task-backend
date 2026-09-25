@@ -242,7 +242,7 @@ router.get("/", requireAuth, async (req, res) => {
   try {
     let sql, params;
     if (req.user.role === "worker") {
-      sql = `SELECT b.*, u.full_name AS customer_name, c.name_en AS category_name
+      sql = `SELECT b.*, u.full_name AS customer_name, u.profile_photo_url AS customer_photo_url, c.name_en AS category_name
              FROM bookings b
              JOIN worker_profiles wp ON wp.id = b.worker_id
              JOIN users u ON u.id = b.customer_id
@@ -250,7 +250,7 @@ router.get("/", requireAuth, async (req, res) => {
              WHERE wp.user_id = $1 ORDER BY b.created_at DESC`;
       params = [req.user.id];
     } else {
-      sql = `SELECT b.*, wu.full_name AS worker_name, c.name_en AS category_name,
+      sql = `SELECT b.*, wu.full_name AS worker_name, wu.profile_photo_url AS worker_photo_url, c.name_en AS category_name,
                     EXISTS (SELECT 1 FROM reviews r WHERE r.booking_id = b.id) AS has_review
              FROM bookings b
              JOIN worker_profiles wp ON wp.id = b.worker_id
@@ -305,7 +305,7 @@ router.get("/:id/receipt", requireAuth, async (req, res) => {
     );
 
     const { rows: details } = await db.query(
-      `SELECT b.*, c.name_en AS category_name, cu.full_name AS customer_name, wu.full_name AS worker_name
+      `SELECT b.*, c.name_en AS category_name, cu.full_name AS customer_name, cu.profile_photo_url AS customer_photo_url, wu.full_name AS worker_name, wu.profile_photo_url AS worker_photo_url
        FROM bookings b
        JOIN categories c ON c.id = b.category_id
        JOIN users cu ON cu.id = b.customer_id
