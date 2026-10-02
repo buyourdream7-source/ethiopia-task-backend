@@ -1,60 +1,80 @@
-// SMS sending, via SMSEthiopia.
+// SMSEthiopia (https://smsethiopia.com) — sends the signup OTP.
 //
-// Requires SMS_API_KEY on Railway. If it isn't set, sendSms throws and the
-// caller falls back to showing the code on screen — see the OTP routes in
-// routes/auth.js.
+// Set ONE environment variable on Railway → your backend service → Variables:
+//   SMSETHIOPIA_KEY = <your API key>
+// Never commit the key or paste it into a file. If it leaks, generate a new
+// one in the SMSEthiopia dashboard; the old one keeps working until you do.
 //
-// Named sms.js rather than after the provider: swapping providers later means
-// changing the endpoint and field names below, and nothing else in the app.
+// This THROWS on every failure rather than failing quietly. That is deliberate:
+// auth.js catches it and falls back to returning the code in the response so
+// signup still works while your sender ID is pending Ethio Telecom approval.
+// A silent failure here would leave users staring at a code box forever.
 
-const SMS_ENDPOINT = "https://smsethiopia.com/api/sms/send";
+const SMS_URL = "https://smsethiopia.com/api/sms/send";
 
 /**
- * SMSEthiopia expects msisdn as country code + number with no plus or spaces,
- * e.g. 251911639555. People type their number every which way, so normalise
- * rather than rejecting input that's perfectly understandable.
+ * Ethiopian numbers reach the API as 2519******** / 2517********.
+ * Accepts 0911…, +251911…, 251911… and 911… and normalises all of them.
+ * Throws if what's left isn't a plausible Ethiopian mobile number.
  */
-function toMsisdn(phone) {
-  const digits = String(phone).replace(/\D/g, "");
+function toEthiopianMsisdn(raw) {
+  let d = String(raw || "").replace(/\D/g, "");
 
-  if (digits.startsWith("251")) return digits;        // already 251...
-  if (digits.startsWith("0")) return `251${digits.slice(1)}`; // 0911... → 251911...
-  if (digits.length === 9) return `251${digits}`;     // 911639555
-  return digits;                                       // hand over as-is
+  if (d.startsWith("251")) d = d.slice(3);
+  else if (d.startsWith("0")) d = d.slice(1);
+
+  // Mobile numbers are 9 digits after the country code and start 9 or 7.
+  if (!/^[97]\d{8}$/.test(d)) {
+    throw new Error(`Not a valid Ethiopian mobile number: ${raw}`);
+  }
+  return `251${d}`;
 }
 
+/**
+ * Sends one SMS. Resolves on success, throws with a readable reason otherwise.
+ */
 async function sendSms(to, message) {
-  const key = process.env.SMS_API_KEY;
-  if (!key) {
-    const err = new Error("SMS_API_KEY is not set");
-    err.code = "SMS_NOT_CONFIGURED";
-    throw err;
+  const key = process.env.SMSETHIOPIA_KEY;
+  if (!key) throw new Error("SMSETHIOPIA_KEY is not set");
+
+  const msisdn = toEthiopianMsisdn(to);
+
+  // Don't let a provider outage hang the signup request.
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+
+  let res;
+  let bodyText;
+  try {
+    res = await fetch(SMS_URL, {
+      method: "POST",
+      headers: { KEY: key, "Content-Type": "application/json" },
+      body: JSON.stringify({ msisdn, text: message }),
+      signal: controller.signal,
+    });
+    bodyText = await res.text();
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error("SMS provider timed out after 15s");
+    throw new Error(`Could not reach SMS provider: ${e.message}`);
+  } finally {
+    clearTimeout(timeout);
   }
 
-  const res = await fetch(SMS_ENDPOINT, {
-    method: "POST",
-    headers: {
-      KEY: key,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ msisdn: toMsisdn(to), text: message }),
-  });
-
-  // Read as text first: a failing gateway often returns an HTML error page,
-  // and parsing that as JSON hides the real reason behind a syntax error.
-  const raw = await res.text();
   let data = null;
-  try { data = JSON.parse(raw); } catch { /* not JSON */ }
+  try { data = JSON.parse(bodyText); } catch { /* provider returned plain text */ }
 
   if (!res.ok) {
-    // Include the raw body when the response has no recognisable message
-    // field — otherwise a 400 tells us nothing about what was actually wrong.
-    const detail = data?.message || data?.error || data?.msg
-      || (raw ? raw.slice(0, 300) : "");
-    throw new Error(`SMS send failed (${res.status})${detail ? `: ${detail}` : ""}`);
+    throw new Error(`SMS send failed (HTTP ${res.status}): ${(bodyText || "").slice(0, 300)}`);
   }
 
-  return data ?? { ok: true };
+  // Providers often return HTTP 200 with a failure in the body — treat any
+  // explicit error/failed marker as a failure so the caller can fall back.
+  const marker = String(data?.status ?? data?.result ?? "").toLowerCase();
+  if (data && (data.error || marker === "failed" || marker === "error")) {
+    throw new Error(`SMS rejected: ${JSON.stringify(data).slice(0, 300)}`);
+  }
+
+  return data ?? { raw: bodyText };
 }
 
-module.exports = { sendSms, toMsisdn };
+module.exports = { sendSms, toEthiopianMsisdn };
