@@ -209,7 +209,8 @@ router.get("/me", requireAuth, requireRole("worker"), async (req, res) => {
   const workerId = rows[0].id;
 
   const { rows: categories } = await db.query(
-    `SELECT c.slug, c.name_en, c.requires_license, wc.price_min, wc.price_max, wc.custom_service_name
+    `SELECT c.slug, c.name_en, c.requires_license, c.pricing_type, c.inspection_fee,
+            wc.price_min, wc.price_max, wc.custom_service_name
      FROM worker_categories wc JOIN categories c ON c.id = wc.category_id
      WHERE wc.worker_id = $1`,
     [workerId]
@@ -237,8 +238,14 @@ router.get("/:id", async (req, res) => {
   );
   if (!rows.length) return res.status(404).json({ error: "Worker not found" });
 
+  // pricing_type and inspection_fee are what tell the booking screen whether
+  // this is a "pay the inspection fee now, price agreed on site" job or a fixed
+  // price. Without them the app can't know, so it showed the price range while
+  // the backend charged the inspection fee — the customer saw one number and
+  // Chapa asked for another.
   const { rows: categories } = await db.query(
-    `SELECT c.slug, c.name_en, c.name_am, c.requires_license, wc.price_min, wc.price_max, wc.custom_service_name
+    `SELECT c.slug, c.name_en, c.name_am, c.requires_license, c.pricing_type, c.inspection_fee,
+            wc.price_min, wc.price_max, wc.custom_service_name
      FROM worker_categories wc JOIN categories c ON c.id = wc.category_id
      WHERE wc.worker_id = $1`,
     [req.params.id]

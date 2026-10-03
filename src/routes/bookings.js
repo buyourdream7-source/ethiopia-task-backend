@@ -245,8 +245,12 @@ router.patch("/:id/quote", requireAuth, requireRole("customer"), async (req, res
 router.get("/", requireAuth, async (req, res) => {
   try {
     let sql, params;
+    // The phone number comes back so either side can call the other straight
+    // from a booking card. It's only ever the OTHER party's number, and only on
+    // bookings this user is part of — the WHERE clauses below guarantee that.
     if (req.user.role === "worker") {
-      sql = `SELECT b.*, u.full_name AS customer_name, u.profile_photo_url AS customer_photo_url, c.name_en AS category_name
+      sql = `SELECT b.*, u.full_name AS customer_name, u.profile_photo_url AS customer_photo_url,
+                    u.phone AS customer_phone, c.name_en AS category_name
              FROM bookings b
              JOIN worker_profiles wp ON wp.id = b.worker_id
              JOIN users u ON u.id = b.customer_id
@@ -254,7 +258,8 @@ router.get("/", requireAuth, async (req, res) => {
              WHERE wp.user_id = $1 ORDER BY b.created_at DESC`;
       params = [req.user.id];
     } else {
-      sql = `SELECT b.*, wu.full_name AS worker_name, wu.profile_photo_url AS worker_photo_url, c.name_en AS category_name,
+      sql = `SELECT b.*, wu.full_name AS worker_name, wu.profile_photo_url AS worker_photo_url,
+                    wu.phone AS worker_phone, c.name_en AS category_name,
                     EXISTS (SELECT 1 FROM reviews r WHERE r.booking_id = b.id) AS has_review
              FROM bookings b
              JOIN worker_profiles wp ON wp.id = b.worker_id
