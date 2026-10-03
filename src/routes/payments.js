@@ -33,6 +33,37 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 const APP_DEEP_LINK = process.env.APP_DEEP_LINK || null;
 const returnBase = APP_DEEP_LINK || FRONTEND_URL;
 
+/**
+ * Where Chapa sends the customer when checkout finishes.
+ *
+ * return_to_app=1 is what makes the app reopen. The web app checks for it, and
+ * only then shows the "Open Y S R" handoff screen that carries the customer
+ * back via the ysr:// deep link. Without it the flag is simply absent, the
+ * handoff never renders, and they're left reading "Payment confirmed" in a
+ * browser tab while the app sits in the background — which is exactly what was
+ * happening, for both the inspection fee and the final payment.
+ *
+ * Built with URL so it stays correct whether or not FRONTEND_URL already
+ * carries a path or query string; falls back to plain concatenation if it
+ * isn't a parseable absolute URL.
+ */
+function buildReturnUrl(bookingId, txRef) {
+  const params = {
+    return_to_app: "1",
+    payment_booking: String(bookingId),
+    tx_ref: String(txRef),
+  };
+  try {
+    const url = new URL(returnBase);
+    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+    return url.toString();
+  } catch {
+    const sep = returnBase.includes("?") ? "&" : "?";
+    const qs = new URLSearchParams(params).toString();
+    return `${returnBase}${sep}${qs}`;
+  }
+}
+
 // Applies the real, database-level side effects of a confirmed payment.
 // Called from both the webhook and the polling endpoint — either one might
 // be the first to see a "paid" result, so this must be safe to run twice.
@@ -186,7 +217,7 @@ router.post("/bookings/:id/initiate", requireAuth, requireRole("customer"), asyn
         firstName,
         lastName: rest.join(" ") || "-",
         txRef,
-        returnUrl: `${returnBase}?payment_booking=${booking.id}&tx_ref=${txRef}`,
+        returnUrl: buildReturnUrl(booking.id, txRef),
         subaccountId,
       });
       res.json({ checkout_url: checkoutUrl, tx_ref: txRef, amount });
