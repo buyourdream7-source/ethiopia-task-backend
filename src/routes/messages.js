@@ -1,6 +1,7 @@
 const express = require("express");
 const db = require("../db");
 const { requireAuth } = require("../middleware/auth");
+const { notify } = require("../utils/notify");
 
 const { makeSafe } = require("../utils/safeRouter");
 
@@ -53,6 +54,37 @@ router.post("/:bookingId/messages", requireAuth, async (req, res) => {
     "INSERT INTO messages (conversation_id, sender_id, content) VALUES ($1,$2,$3) RETURNING *",
     [convo.id, req.user.id, content.trim()]
   );
+
+  // Tell the other side. Without this a message just sits in the app until
+  // someone happens to open it, which is how jobs stall — of everything we
+  // notify about, an unanswered question is the one that actually blocks work.
+  //
+  // The conversation carries both user ids, so the recipient is simply
+  // whichever one isn't the sender. Deliberately not awaited: notify() already
+  // swallows its own errors, and a slow push should never hold up the reply
+  // that puts the message on the sender's screen.
+  const recipientId = String(convo.customer_id) === String(req.user.id)
+    ? convo.worker_id
+    : convo.customer_id;
+
+  if (recipientId) {
+    (async () => {
+      let senderName = "New message";
+      try {
+        const { rows: s } = await db.query("SELECT full_name FROM users WHERE id = $1", [req.user.id]);
+        if (s.length && s[0].full_name) senderName = s[0].full_name;
+      } catch { /* fall back to the generic title */ }
+
+      // The message itself is the body, trimmed to something a notification
+      // tray can actually show. Title is the sender's name, because "Abebe"
+      // gets opened and "New message" gets swiped away.
+      const preview = content.trim().length > 120
+        ? `${content.trim().slice(0, 117)}…`
+        : content.trim();
+
+      await notify(recipientId, senderName, preview, convo.booking_id);
+    })();
+  }
 
   // The message still sends — workers and customers genuinely need to share
   // addresses and sometimes numbers to get a job done. But flag it so the app

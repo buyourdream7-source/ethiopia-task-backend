@@ -61,6 +61,7 @@ app.use("/api/conversations", messageRoutes); // /api/conversations/:bookingId/m
 app.use("/api/admin", adminRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/presence", require("./routes/presence"));
 
 // Fallback error handler — keeps stack traces out of API responses
 app.use((err, req, res, next) => {
