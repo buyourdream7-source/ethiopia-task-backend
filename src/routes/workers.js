@@ -405,11 +405,13 @@ router.patch("/me/bank-details", requireAuth, requireRole("worker"), async (req,
       bankCode: bank_code,
       accountNumber: account_number,
       accountName: account_name,
-      // Chapa's split_value is the PLATFORM's cut, not the worker's: with
-      // split_type 'percentage' and 0.15, Chapa keeps 15% for us and settles
-      // the rest to the worker's bank. Sending the worker's share here would
-      // invert the split and pay them our commission instead.
-      splitValue: rate,
+      // Chapa's split_value is the SUBACCOUNT's (worker's) share of each
+      // payment, not the platform's cut. Verified on a live 10 ETB test:
+      // a subaccount created with 0.1 paid the worker 10%, not 90%.
+      // So send what the worker should KEEP (1 - commission rate). With a
+      // 10% commission that is 0.9. Rounded to avoid float noise like
+      // 0.8999999999999999 reaching Chapa.
+      splitValue: Math.round((1 - rate) * 10000) / 10000,
     });
 
     const { rows: updated } = await db.query(
