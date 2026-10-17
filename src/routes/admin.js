@@ -1,7 +1,9 @@
 const express = require("express");
+const bcrypt = require("bcryptjs");
 const db = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { signedUrlFor } = require("../storage");
+const { deleteAccount } = require("../accountDeletion");
 
 const { makeSafe } = require("../utils/safeRouter");
 
@@ -129,6 +131,96 @@ router.patch("/users/:id/suspend", async (req, res) => {
   );
   if (!rows.length) return res.status(404).json({ error: "User not found" });
   res.json(rows[0]);
+});
+
+// --- Managing accounts (admin) ---
+
+// Customers and workers, newest first. ?role=customer|worker narrows it,
+// ?q= matches name or phone. Deleted accounts are left out.
+router.get("/users", async (req, res) => {
+  try {
+    const params = [];
+    const where = ["u.role IN ('customer','worker')", "u.is_deleted IS NOT TRUE"];
+
+    if (["customer", "worker"].includes(req.query.role)) {
+      params.push(req.query.role);
+      where.push(`u.role = $${params.length}`);
+    }
+    if (req.query.q) {
+      params.push(`%${String(req.query.q).trim()}%`);
+      where.push(`(u.full_name ILIKE $${params.length} OR u.phone ILIKE $${params.length})`);
+    }
+
+    const { rows } = await db.query(
+      `SELECT u.id, u.full_name, u.phone, u.role, u.is_suspended, u.created_at
+       FROM users u
+       WHERE ${where.join(" AND ")}
+       ORDER BY u.created_at DESC
+       LIMIT 200`,
+      params
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error("GET /admin/users crashed:", e);
+    res.status(500).json({ error: "Could not load users." });
+  }
+});
+
+// Delete an account. Same scrub the user gets from the app (personal data
+// removed, booking history kept), plus the phone number is released so the
+// person can register again. phone is varchar(20), hence the short value.
+router.delete("/users/:id", async (req, res) => {
+  try {
+    const { rows } = await db.query("SELECT id, role, is_deleted FROM users WHERE id = $1", [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: "User not found" });
+
+    const target = rows[0];
+    if (target.id === req.user.id) return res.status(400).json({ error: "You can't delete your own account here." });
+    if (target.role === "admin") return res.status(400).json({ error: "Admin accounts can't be deleted from here." });
+
+    if (!target.is_deleted) await deleteAccount(target.id);
+
+    await db.query(
+      `UPDATE users
+          SET phone = 'del-' || substr(replace(id::text, '-', ''), 1, 15),
+              fcm_token = NULL,
+              is_deleted = true,
+              updated_at = now()
+        WHERE id = $1`,
+      [target.id]
+    );
+    await db.query("UPDATE worker_profiles SET is_available = false WHERE user_id = $1", [target.id]);
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("DELETE /admin/users/:id crashed:", e);
+    res.status(500).json({ error: "Could not delete that account." });
+  }
+});
+
+// Set a new password for someone locked out. The old one is never shown (it
+// is hashed and can't be read back); the admin types a new one and tells the
+// person, who should change it from their own settings.
+router.patch("/users/:id/password", async (req, res) => {
+  try {
+    const { new_password } = req.body;
+    if (typeof new_password !== "string" || new_password.length < 8) {
+      return res.status(400).json({ error: "The new password must be at least 8 characters." });
+    }
+
+    const { rows } = await db.query("SELECT id, role, is_deleted FROM users WHERE id = $1", [req.params.id]);
+    if (!rows.length) return res.status(404).json({ error: "User not found" });
+    if (rows[0].is_deleted) return res.status(400).json({ error: "That account has been deleted." });
+    if (rows[0].role === "admin") return res.status(400).json({ error: "Admin passwords can't be changed from here." });
+
+    const hash = await bcrypt.hash(new_password, 12);
+    await db.query("UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2", [hash, rows[0].id]);
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("PATCH /admin/users/:id/password crashed:", e);
+    res.status(500).json({ error: "Could not change the password." });
+  }
 });
 
 // --- Customers ---

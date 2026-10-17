@@ -162,6 +162,19 @@ router.delete("/me", requireAuth, async (req, res) => {
   if (!valid) return res.status(401).json({ error: "Incorrect password" });
 
   await deleteAccount(req.user.id);
+
+  // Release the phone number so the person can register again. phone is
+  // varchar(20), so the placeholder has to fit: "del-" + 15 chars = 19.
+  await db.query(
+    `UPDATE users
+        SET phone = 'del-' || substr(replace(id::text, '-', ''), 1, 15),
+            fcm_token = NULL,
+            updated_at = now()
+      WHERE id = $1`,
+    [req.user.id]
+  );
+  await db.query("UPDATE worker_profiles SET is_available = false WHERE user_id = $1", [req.user.id]);
+
   res.json({ ok: true });
 });
 
