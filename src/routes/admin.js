@@ -4,6 +4,7 @@ const db = require("../db");
 const { requireAuth, requireRole } = require("../middleware/auth");
 const { signedUrlFor } = require("../storage");
 const { deleteAccount } = require("../accountDeletion");
+const { sendPush } = require("../push");
 
 const { makeSafe } = require("../utils/safeRouter");
 
@@ -220,6 +221,87 @@ router.patch("/users/:id/password", async (req, res) => {
   } catch (e) {
     console.error("PATCH /admin/users/:id/password crashed:", e);
     res.status(500).json({ error: "Could not change the password." });
+  }
+});
+
+// --- Messages from the admin ---
+//
+// A note from the platform to one person, or to a whole group: a "suggestion"
+// (friendly nudge) or a "warning" (something they need to act on). It lands
+// in the person's notification bell like any booking update, and as a push.
+//
+// A warning is delivered even if the person has switched notifications off in
+// Settings, because "your account may be suspended" shouldn't be mutable.
+// Suggestions respect that setting.
+
+const MESSAGE_KINDS = {
+  warning:    { type: "admin_warning",    prefix: "\u26A0\uFE0F " },
+  suggestion: { type: "admin_suggestion", prefix: "\uD83D\uDCA1 " },
+};
+
+async function insertNotification(userId, title, body, type) {
+  try {
+    await db.query(
+      "INSERT INTO notifications (user_id, title, body, type) VALUES ($1,$2,$3,$4)",
+      [userId, title, body, type]
+    );
+  } catch (e) {
+    // If the type column rejects the value, still deliver the message.
+    await db.query("INSERT INTO notifications (user_id, title, body) VALUES ($1,$2,$3)", [userId, title, body]);
+  }
+}
+
+// POST /api/admin/messages
+// { kind: "warning" | "suggestion", title, body,
+//   audience: "user" | "customers" | "workers" | "everyone", user_id? }
+router.post("/messages", async (req, res) => {
+  try {
+    const { kind, audience } = req.body;
+    const title = String(req.body.title || "").trim();
+    const body = String(req.body.body || "").trim();
+
+    if (!MESSAGE_KINDS[kind]) return res.status(400).json({ error: "kind must be 'warning' or 'suggestion'." });
+    if (!title || title.length > 80) return res.status(400).json({ error: "Add a short title (80 characters at most)." });
+    if (!body || body.length > 500) return res.status(400).json({ error: "Write the message (500 characters at most)." });
+
+    let recipients;
+    if (audience === "user") {
+      if (!req.body.user_id) return res.status(400).json({ error: "Choose who to send this to." });
+      ({ rows: recipients } = await db.query(
+        "SELECT id, fcm_token, notifications_enabled FROM users WHERE id = $1 AND is_deleted IS NOT TRUE",
+        [req.body.user_id]
+      ));
+    } else if (["customers", "workers", "everyone"].includes(audience)) {
+      const roles = audience === "customers" ? ["customer"] : audience === "workers" ? ["worker"] : ["customer", "worker"];
+      ({ rows: recipients } = await db.query(
+        "SELECT id, fcm_token, notifications_enabled FROM users WHERE role = ANY($1) AND is_deleted IS NOT TRUE",
+        [roles]
+      ));
+    } else {
+      return res.status(400).json({ error: "audience must be user, customers, workers or everyone." });
+    }
+    if (!recipients.length) return res.status(404).json({ error: "No one to send this to." });
+
+    const { type, prefix } = MESSAGE_KINDS[kind];
+    const fullTitle = prefix + title;
+    let sent = 0;
+
+    for (const r of recipients) {
+      const muted = r.notifications_enabled === false && kind !== "warning";
+      if (muted) continue;
+      try {
+        await insertNotification(r.id, fullTitle, body, type);
+        await sendPush(r.fcm_token, fullTitle, body, { kind });
+        sent++;
+      } catch (e) {
+        console.error("admin message to", r.id, "failed:", e.message);
+      }
+    }
+
+    res.json({ sent, total: recipients.length });
+  } catch (e) {
+    console.error("POST /admin/messages crashed:", e);
+    res.status(500).json({ error: "Could not send the message." });
   }
 });
 
