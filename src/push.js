@@ -73,10 +73,15 @@ async function sendPush(fcmToken, title, body, data = {}) {
       android: {
         priority: "high",
         notification: {
-          // Without a channel the notification can be silently dropped on
-          // Android 8+. "default" is the channel Capacitor creates for us.
-          channelId: "default",
+          // The app creates this channel on launch (see usePushRegistration
+          // in App.jsx) with sound, vibration and heads-up turned on. Phones
+          // that haven't updated the app yet don't have it, and fall back to
+          // Android's standard channel: still delivered, still plays a sound.
+          channelId: "ysr_alerts",
           sound: "default",
+          defaultSound: true,
+          defaultVibrateTimings: true,
+          notificationPriority: "PRIORITY_MAX",
         },
       },
     });
