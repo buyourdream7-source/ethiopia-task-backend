@@ -75,19 +75,30 @@ router.post("/", requireAuth, requireRole("customer"), async (req, res) => {
       [req.user.id, worker_id]
     );
 
+    // One job at a time per customer, whichever worker or category. A new
+    // booking is only allowed once the previous one is completed and
+    // confirmed (or cancelled). Unpaid bookings from the last 30 minutes still
+    // count, because the customer may be mid-payment.
+    await db.query(
+      `UPDATE bookings SET status = 'cancelled', updated_at = now(),
+         cancellation_reason = 'Payment not completed'
+       WHERE customer_id = $1 AND status = 'pending_payment'
+         AND created_at < now() - interval '30 minutes'`,
+      [req.user.id]
+    );
     const { rows: open } = await db.query(
-      `SELECT id, status FROM bookings
-       WHERE customer_id = $1 AND worker_id = $2
-         AND status NOT IN ('completed', 'confirmed', 'cancelled')
-       LIMIT 1`,
-      [req.user.id, worker_id]
+      `SELECT id, status, worker_id FROM bookings
+       WHERE customer_id = $1
+         AND status NOT IN ('confirmed', 'cancelled', 'disputed')
+       ORDER BY created_at DESC LIMIT 1`,
+      [req.user.id]
     );
     if (open.length) {
       const unpaid = open[0].status === "pending_payment";
       return res.status(409).json({
         error: unpaid
-          ? "You started a booking with this worker a few minutes ago. Finish paying for it in Bookings, or try again in a little while."
-          : "You already have a booking with this worker in progress. You can book them again once that job is completed.",
+          ? "You have a booking waiting for payment. Finish paying for it in Bookings, or try again in a little while."
+          : "You already have a job in progress. Please finish it (and confirm it as complete) before booking another service.",
         code: "ACTIVE_BOOKING_EXISTS",
         booking_id: open[0].id,
       });
@@ -259,7 +270,7 @@ router.get("/", requireAuth, async (req, res) => {
       params = [req.user.id];
     } else {
       sql = `SELECT b.*, wu.full_name AS worker_name, wu.profile_photo_url AS worker_photo_url,
-                    wu.phone AS worker_phone, c.name_en AS category_name,
+                    CASE WHEN EXISTS (SELECT 1 FROM payments p WHERE p.booking_id = b.id AND p.status = 'paid') THEN wu.phone END AS worker_phone, c.name_en AS category_name,
                     EXISTS (SELECT 1 FROM reviews r WHERE r.booking_id = b.id) AS has_review
              FROM bookings b
              JOIN worker_profiles wp ON wp.id = b.worker_id

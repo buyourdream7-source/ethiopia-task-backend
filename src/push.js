@@ -60,7 +60,7 @@ function getMessagingClient() {
  * Firebase isn't configured yet, or the token is missing/invalid — always
  * resolves, never throws.
  */
-async function sendPush(fcmToken, title, body, data = {}) {
+async function sendPush(fcmToken, title, body, data = {}, opts = {}) {
   if (!fcmToken) return;
   const fb = getMessagingClient();
   if (!fb) return;
@@ -69,7 +69,7 @@ async function sendPush(fcmToken, title, body, data = {}) {
     await fb.send({
       token: fcmToken,
       notification: { title, body },
-      data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
+      data: Object.fromEntries(Object.entries({ ...data, ...(opts.ring ? { ring: "1" } : {}) }).map(([k, v]) => [k, String(v)])),
       android: {
         priority: "high",
         notification: {
@@ -77,9 +77,9 @@ async function sendPush(fcmToken, title, body, data = {}) {
           // in App.jsx) with sound, vibration and heads-up turned on. Phones
           // that haven't updated the app yet don't have it, and fall back to
           // Android's standard channel: still delivered, still plays a sound.
-          channelId: "ysr_alerts",
-          sound: "default",
-          defaultSound: true,
+          // opts.ring = a new job request: use the ringtone channel instead.
+          channelId: opts.ring ? "ysr_jobs" : "ysr_alerts",
+          ...(opts.ring ? { sound: "job_ring" } : { sound: "default", defaultSound: true }),
           defaultVibrateTimings: true,
           notificationPriority: "PRIORITY_MAX",
         },

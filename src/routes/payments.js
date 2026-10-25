@@ -89,7 +89,7 @@ async function applyConfirmedPayment(payment) {
         [shouldLockPrice, booking.id]
       );
       const { rows: w } = await db.query("SELECT user_id FROM worker_profiles WHERE id = $1", [booking.worker_id]);
-      if (w.length) await notify(w[0].user_id, "New job request", "A customer has booked you — payment received.", booking.id);
+      if (w.length) await notify(w[0].user_id, "New job request", "A customer has booked you — payment received.", booking.id, { ring: true });
     }
   } else if (payment.payment_type === "final_payment") {
     if (booking.status === "pending_final_payment") {
