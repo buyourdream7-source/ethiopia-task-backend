@@ -420,6 +420,36 @@ router.patch("/:id/status", requireAuth, async (req, res) => {
       // suspension automatically; that's an admin-only action (see /admin/users/:id/suspend).
       await db.query("UPDATE users SET payment_deadline = NULL WHERE id = $1", [booking.customer_id]);
 
+      // Referral reward: if this worker joined with someone's referral code,
+      // that someone earns a share of YSR's commission on this job. It comes
+      // out of YSR's cut, so the worker's earnings are untouched. A failure
+      // here must never undo the confirmation, hence the try/catch.
+      try {
+        const { rows: refRows } = await db.query(
+          `SELECT wp.referred_by, ru.id AS referrer_user_id
+           FROM worker_profiles wp
+           LEFT JOIN worker_profiles rwp ON rwp.id = wp.referred_by
+           LEFT JOIN users ru ON ru.id = rwp.user_id
+           WHERE wp.id = $1`,
+          [booking.worker_id]
+        );
+        const referrerId = refRows[0] && refRows[0].referred_by;
+        const share = Number(process.env.REFERRAL_SHARE || 0.5);
+        const reward = Math.round(Number(commissionAmount) * share * 100) / 100;
+        if (referrerId && reward > 0) {
+          const ins = await db.query(
+            `INSERT INTO referral_rewards (booking_id, referrer_id, referred_id, amount, rate)
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (booking_id) DO NOTHING RETURNING id`,
+            [booking.id, referrerId, booking.worker_id, reward, share]
+          );
+          if (ins.rows.length && refRows[0].referrer_user_id) {
+            await notify(refRows[0].referrer_user_id, "Referral bonus", `A worker you invited finished a job. You earned ${reward} ETB.`, null);
+          }
+        }
+      } catch (e) {
+        console.error("Referral reward failed:", e.message);
+      }
+
       const { rows: w } = await db.query("SELECT user_id FROM worker_profiles WHERE id = $1", [booking.worker_id]);
       if (w.length) await notify(w[0].user_id, "Job confirmed", `The customer confirmed the job — ${workerEarnings} ETB is yours.`, booking.id);
     } else {

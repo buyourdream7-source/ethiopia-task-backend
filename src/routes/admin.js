@@ -408,4 +408,51 @@ router.patch("/settings/inspection-fees/:slug", async (req, res) => {
   }
 });
 
+// GET /api/admin/referrals — who has invited workers and what YSR owes them.
+router.get("/referrals", async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT wp.id AS worker_id, u.full_name, u.phone, wp.referral_code,
+              (SELECT COUNT(*)::int FROM worker_profiles x WHERE x.referred_by = wp.id) AS invited,
+              COALESCE(SUM(r.amount) FILTER (WHERE r.status = 'owed'), 0) AS owed,
+              COALESCE(SUM(r.amount) FILTER (WHERE r.status = 'paid'), 0) AS paid
+       FROM worker_profiles wp
+       JOIN users u ON u.id = wp.user_id
+       LEFT JOIN referral_rewards r ON r.referrer_id = wp.id
+       WHERE u.is_deleted IS NOT TRUE
+         AND (EXISTS (SELECT 1 FROM worker_profiles x WHERE x.referred_by = wp.id))
+       GROUP BY wp.id, u.full_name, u.phone, wp.referral_code
+       ORDER BY owed DESC, invited DESC`
+    );
+    res.json(rows.map((r) => ({ ...r, owed: Number(r.owed), paid: Number(r.paid) })));
+  } catch (e) {
+    console.error("GET /admin/referrals crashed:", e);
+    res.status(500).json({ error: "Could not load referrals." });
+  }
+});
+
+// POST /api/admin/referrals/:workerId/pay — after paying a referrer outside
+// the app (Telebirr, bank, cash), mark everything owed to them as paid.
+router.post("/referrals/:workerId/pay", async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      `UPDATE referral_rewards SET status = 'paid', paid_at = now()
+       WHERE referrer_id = $1 AND status = 'owed' RETURNING amount`,
+      [req.params.workerId]
+    );
+    const total = rows.reduce((s, r) => s + Number(r.amount), 0);
+    if (total > 0) {
+      const { rows: u } = await db.query("SELECT user_id FROM worker_profiles WHERE id = $1", [req.params.workerId]);
+      if (u.length) {
+        const { notify } = require("../utils/notify");
+        await notify(u[0].user_id, "Referral bonus paid", `We paid your referral bonus of ${total} ETB.`, null);
+      }
+    }
+    res.json({ paid: total });
+  } catch (e) {
+    console.error("POST /admin/referrals/:id/pay crashed:", e);
+    res.status(500).json({ error: "Could not mark this as paid." });
+  }
+});
+
 module.exports = router;

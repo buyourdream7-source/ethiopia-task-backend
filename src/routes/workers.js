@@ -200,6 +200,42 @@ router.get("/me/earnings", requireAuth, requireRole("worker"), async (req, res) 
   }
 });
 
+// GET /api/workers/me/referral — the worker's invite code and what it has earned.
+router.get("/me/referral", requireAuth, requireRole("worker"), async (req, res) => {
+  try {
+    const { rows } = await db.query("SELECT id, referral_code FROM worker_profiles WHERE user_id = $1", [req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: "Worker profile not found" });
+    const me = rows[0];
+    const { rows: totals } = await db.query(
+      `SELECT COALESCE(SUM(amount) FILTER (WHERE status = 'owed'), 0) AS owed,
+              COALESCE(SUM(amount) FILTER (WHERE status = 'paid'), 0) AS paid
+       FROM referral_rewards WHERE referrer_id = $1`,
+      [me.id]
+    );
+    const { rows: invited } = await db.query(
+      `SELECT u.full_name, wp.created_at, wp.verification_status,
+              COALESCE(SUM(r.amount), 0) AS earned, COUNT(r.id)::int AS jobs
+       FROM worker_profiles wp
+       JOIN users u ON u.id = wp.user_id
+       LEFT JOIN referral_rewards r ON r.referred_id = wp.id
+       WHERE wp.referred_by = $1
+       GROUP BY u.full_name, wp.created_at, wp.verification_status
+       ORDER BY wp.created_at DESC LIMIT 50`,
+      [me.id]
+    );
+    res.json({
+      code: me.referral_code,
+      share: Number(process.env.REFERRAL_SHARE || 0.5),
+      owed: Number(totals[0].owed),
+      paid: Number(totals[0].paid),
+      invited,
+    });
+  } catch (e) {
+    console.error("GET /workers/me/referral crashed:", e);
+    res.status(500).json({ error: "Could not load your referral details." });
+  }
+});
+
 router.get("/me", requireAuth, requireRole("worker"), async (req, res) => {
   const { rows } = await db.query(
     `SELECT wp.* FROM worker_profiles wp WHERE wp.user_id = $1`,

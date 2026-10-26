@@ -1,22 +1,43 @@
+const crypto = require("crypto");
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const db = require("../db");
 const { signToken } = require("../utils/jwt");
 const { requireAuth } = require("../middleware/auth");
-const { sendSms } = require("../utils/sms");
-const { generateFrom } = require("../utils/username");
-
-const { makeSafe } = require("../utils/safeRouter");
 
 const router = express.Router();
-// A thrown error here returns 500 instead of killing the whole process.
-makeSafe(router);
+
+// Referral codes look like YSR-K7M2P. No 0/O/1/I/L so they survive being read
+// out loud or typed from a screenshot.
+const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const makeReferralCode = () => {
+  let s = "YSR-";
+  for (let i = 0; i < 5; i++) s += CODE_CHARS[crypto.randomInt(CODE_CHARS.length)];
+  return s;
+};
+
+// Creates the worker's profile row with its one-and-only referral code.
+async function createWorkerProfile(userId, referredBy) {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      await db.query(
+        "INSERT INTO worker_profiles (user_id, referral_code, referred_by) VALUES ($1, $2, $3)",
+        [userId, makeReferralCode(), referredBy || null]
+      );
+      return;
+    } catch (e) {
+      // 23505 = that code already exists; try another. Anything else is real.
+      if (e.code !== "23505" || !String(e.constraint || "").includes("referral_code")) throw e;
+    }
+  }
+  throw new Error("Could not generate a referral code");
+}
 
 // Ethiopian mobile numbers: +2519XXXXXXXX or +2517XXXXXXXX (9 or 7 series), 9 digits after country code
 const PHONE_REGEX = /^\+251[97]\d{8}$/;
 
 router.post("/register", async (req, res) => {
-  const { phone, email, password, full_name, role, preferred_language } = req.body;
+  const { phone, email, password, full_name, role, preferred_language, referral_code } = req.body;
 
   if (!phone || !password || !full_name) {
     return res.status(400).json({ error: "phone, password and full_name are required" });
@@ -31,6 +52,20 @@ router.post("/register", async (req, res) => {
   // Admins are never created through public registration — see scripts/create-admin.js
 
   try {
+    // A referral code is optional and only means something for workers. If one
+    // is typed it has to be real, so a typo doesn't quietly cost the referrer.
+    let referredBy = null;
+    const typedCode = String(referral_code || "").trim().toUpperCase();
+    if (finalRole === "worker" && typedCode) {
+      const { rows: ref } = await db.query(
+        `SELECT wp.id FROM worker_profiles wp JOIN users u ON u.id = wp.user_id
+         WHERE wp.referral_code = $1 AND u.is_deleted IS NOT TRUE AND u.is_suspended IS NOT TRUE`,
+        [typedCode]
+      );
+      if (!ref.length) return res.status(400).json({ error: "That referral code isn't valid. Check it, or leave it empty." });
+      referredBy = ref[0].id;
+    }
+
     const existing = await db.query("SELECT id FROM users WHERE phone = $1", [phone]);
     if (existing.rows.length) {
       return res.status(409).json({ error: "An account with this phone number already exists" });
@@ -38,21 +73,17 @@ router.post("/register", async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 12);
 
-    // Everyone gets a username so customers have something unambiguous to
-    // search for. Derived from their name; they can change it later.
-    const username = await generateFrom(full_name, phone);
-
     const { rows } = await db.query(
-      `INSERT INTO users (phone, email, password_hash, full_name, username, role, preferred_language)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, phone, email, full_name, username, role, preferred_language, created_at`,
-      [phone, email || null, passwordHash, full_name, username, finalRole, preferred_language || "en"]
+      `INSERT INTO users (phone, email, password_hash, full_name, role, preferred_language)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, phone, email, full_name, role, preferred_language, created_at`,
+      [phone, email || null, passwordHash, full_name, finalRole, preferred_language || "en"]
     );
     const user = rows[0];
 
     // Worker accounts automatically get an empty worker_profile row to fill in next
     if (finalRole === "worker") {
-      await db.query("INSERT INTO worker_profiles (user_id) VALUES ($1)", [user.id]);
+      await createWorkerProfile(user.id, referredBy);
     }
 
     const token = signToken(user);
@@ -97,88 +128,16 @@ router.post("/login", async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// Phone verification (OTP)
+// Phone verification (OTP) — DISABLED
 //
-// Sends the code via AfroMessage. If AFROMESSAGE_TOKEN isn't set, or the send
-// fails for any reason (bad credentials, no credit, network issue), the code
-// is returned as `dev_otp` instead so registration is never fully blocked by
-// an SMS problem — the app shows it on screen and says why.
+// Removed for now: no SMS provider credit yet, and OTP isn't needed at this
+// stage. New users are treated as verified (see migration_015).
+//
+// To re-enable later:
+//   1. Restore these routes from git history
+//   2. Set AFROMESSAGE_TOKEN + AFROMESSAGE_SENDER_NAME on Railway
+//   3. Restore PhoneVerificationGate in App.jsx
+//   4. ALTER TABLE users ALTER COLUMN is_phone_verified SET DEFAULT false;
 // ─────────────────────────────────────────────────────────────────────────
-
-// POST /api/auth/send-otp — generate a code and text it to the user
-router.post("/send-otp", requireAuth, async (req, res) => {
-  try {
-    const code = String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);          // 10 minutes
-
-    const { rows } = await db.query("SELECT phone, is_phone_verified FROM users WHERE id = $1", [req.user.id]);
-    if (!rows.length) return res.status(404).json({ error: "User not found" });
-    if (rows[0].is_phone_verified) return res.json({ already_verified: true });
-
-    const phone = rows[0].phone;
-
-    // Replace any earlier unused code for this user so only the newest works.
-    await db.query("DELETE FROM otp_codes WHERE user_id = $1", [req.user.id]);
-    await db.query(
-      "INSERT INTO otp_codes (user_id, code, expires_at) VALUES ($1,$2,$3)",
-      [req.user.id, code, expiresAt]
-    );
-
-    try {
-      await sendSms(phone, `Your Y S R verification code is ${code}. It expires in 10 minutes.`);
-      return res.json({ sent: true, via: "sms" });
-    } catch (smsErr) {
-      // SMS failed — don't strand the user. Return the code with the reason so
-      // the app can show it on screen and make clear this isn't normal.
-      console.error("OTP SMS send failed:", smsErr.message);
-      return res.json({ sent: true, via: "fallback", dev_otp: code, reason: smsErr.message });
-    }
-  } catch (err) {
-    console.error("POST /auth/send-otp crashed:", err);
-    res.status(500).json({ error: "Could not send your verification code. Please try again." });
-  }
-});
-
-// POST /api/auth/verify-otp — check the code and mark the phone verified
-router.post("/verify-otp", requireAuth, async (req, res) => {
-  try {
-    const { code } = req.body;
-    if (!code) return res.status(400).json({ error: "Enter the code we sent you." });
-
-    const { rows } = await db.query(
-      "SELECT id, code, expires_at, attempts FROM otp_codes WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
-      [req.user.id]
-    );
-    if (!rows.length) {
-      return res.status(400).json({ error: "No code found — tap resend to get a new one." });
-    }
-
-    const otp = rows[0];
-
-    if (new Date(otp.expires_at) < new Date()) {
-      await db.query("DELETE FROM otp_codes WHERE id = $1", [otp.id]);
-      return res.status(400).json({ error: "That code expired — tap resend to get a new one." });
-    }
-
-    // Cap guesses so a 6-digit code can't be brute-forced.
-    if (otp.attempts >= 5) {
-      await db.query("DELETE FROM otp_codes WHERE id = $1", [otp.id]);
-      return res.status(429).json({ error: "Too many incorrect attempts — tap resend to get a new code." });
-    }
-
-    if (String(code).trim() !== otp.code) {
-      await db.query("UPDATE otp_codes SET attempts = attempts + 1 WHERE id = $1", [otp.id]);
-      return res.status(400).json({ error: "That code isn't right. Please check and try again." });
-    }
-
-    await db.query("UPDATE users SET is_phone_verified = true, updated_at = now() WHERE id = $1", [req.user.id]);
-    await db.query("DELETE FROM otp_codes WHERE user_id = $1", [req.user.id]);
-
-    res.json({ verified: true });
-  } catch (err) {
-    console.error("POST /auth/verify-otp crashed:", err);
-    res.status(500).json({ error: "Could not verify your code. Please try again." });
-  }
-});
 
 module.exports = router;
