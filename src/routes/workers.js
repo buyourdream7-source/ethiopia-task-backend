@@ -206,6 +206,30 @@ router.get("/me/referral", requireAuth, requireRole("worker"), async (req, res) 
     const { rows } = await db.query("SELECT id, referral_code FROM worker_profiles WHERE user_id = $1", [req.user.id]);
     if (!rows.length) return res.status(404).json({ error: "Worker profile not found" });
     const me = rows[0];
+
+    // Workers created before referral codes existed, or by an older sign-up
+    // route, have none yet. Make theirs now, once; it never changes after.
+    if (!me.referral_code) {
+      const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+      for (let attempt = 0; attempt < 8 && !me.referral_code; attempt++) {
+        let code = "YSR-";
+        for (let i = 0; i < 5; i++) code += chars[Math.floor(Math.random() * chars.length)];
+        try {
+          const up = await db.query(
+            "UPDATE worker_profiles SET referral_code = $1 WHERE id = $2 AND referral_code IS NULL RETURNING referral_code",
+            [code, me.id]
+          );
+          if (up.rows.length) me.referral_code = up.rows[0].referral_code;
+          else {
+            const again = await db.query("SELECT referral_code FROM worker_profiles WHERE id = $1", [me.id]);
+            me.referral_code = again.rows[0].referral_code;
+          }
+        } catch (e) {
+          if (e.code !== "23505") throw e; // code already taken: try another
+        }
+      }
+    }
+
     const { rows: totals } = await db.query(
       `SELECT COALESCE(SUM(amount) FILTER (WHERE status = 'owed'), 0) AS owed,
               COALESCE(SUM(amount) FILTER (WHERE status = 'paid'), 0) AS paid
