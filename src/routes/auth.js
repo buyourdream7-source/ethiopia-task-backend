@@ -83,7 +83,22 @@ router.post("/register", async (req, res) => {
 
     // Worker accounts automatically get an empty worker_profile row to fill in next
     if (finalRole === "worker") {
-      await createWorkerProfile(user.id, referredBy);
+      try {
+        try {
+        await createWorkerProfile(user.id, referredBy);
+      } catch (profileErr) {
+        // Don't leave a worker account with no profile behind: remove it so
+        // the person can simply try again with the same phone number.
+        await db.query("DELETE FROM users WHERE id = $1", [user.id]).catch(() => {});
+        throw profileErr;
+      }
+      } catch (profileErr) {
+        // Don't leave a half-made account behind: without this, a failed
+        // profile insert would leave the phone number taken by a user who can
+        // never log in as a worker.
+        await db.query("DELETE FROM users WHERE id = $1", [user.id]).catch(() => {});
+        throw profileErr;
+      }
     }
 
     const token = signToken(user);
